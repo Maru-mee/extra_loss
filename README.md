@@ -55,10 +55,10 @@ Non-Warranty: This software is provided "as is", without warranty of any kind. (
 Limitation of Liability: In no event shall the author be liable for any claim, damages or other liability arising from the use of this software. (本ソフトウェアの使用により生じたトラブルや損害について、作者は一切の責任を負いかねます)
 
 issue, PRについて
-趣味の範囲での対応になります。
-・issueついては、ある程度、作者の想定使用範囲に合致している場合のみ対応します。
+趣味の範囲、知の共有を目的とした範囲の対応になります。
+* issueついては、ある程度、作者の想定使用範囲に合致している場合のみ対応します。
 とはいえ、さほど複雑なスクリプトでは有りませんので、
 多くの場合、Geminiなどへの質問で解決するはずです。
-・pull_requestについても同様です。
+* pull_requestについても同様です。
 なお、新しいlossの追加提案は第三者様の権利侵害が発生しない範囲で、ご自由にどうぞ。
-・無名のスクリプトですので、小さいコミュニティでこじんまりやりましょう。
+* 無名のスクリプトですので、小さいコミュニティでこじんまりやりましょう。
