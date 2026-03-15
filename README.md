@@ -17,14 +17,14 @@ sd-scriptsのオプション機能です。<br>
 * ε-pred, v-predに対応<br>
 
 ・使い方<br>
-ライブラリとして呼び出せばOKです。<br>
-下記はやり方を知らない人向けの説明です<br>
+お手持ちのloss計算直後に、lossをcalc_extra_losses関数で上書きしてください<br>
+添付の記入例を参考にしてください<br>
 
 * 学習ツール（sd-scriptsなど）のフォルダ内に、任意のフォルダを作成（フォルダ名の例：custom）<br>
 * customフォルダへ、loss_extra_calc.pyを保存<br>
 * customフォルダへ__init__.pyという、空のファイルを追加<br>
 * 自分が使いたい学習ツール（例：sdxl_train.pyなど）へ、下記を追加<br>
-  添付の記入例を参考にしてください<br>
+
 
   * 文頭に下記を追加<br>
   ```
