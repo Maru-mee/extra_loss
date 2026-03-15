@@ -45,14 +45,13 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 * このlossは比較的厳密な学習を求めることを目的に検証しています。ベースモデルの情報を維持したい場合には、やや強すぎるかもしれません。
 
 ライセンス/License<br>
-License: MIT License
-Ownership: This is an original implementation. All code was written by the author. (本コードは作者による自作のオリジナル実装です)
-Technical Reference: The PCGrad algorithm is based on public research. This specific implementation is original. (PCGradアルゴリズムは公知の研究に基づいた実装であり、コード自体は独自に作成されたものです)
+* License: MIT License
+* Ownership: This is an original implementation. All code was written by the author. (本コードは作者による自作のオリジナル実装です)
+* Technical Reference: The PCGrad algorithm is based on public research. This specific implementation is original. (PCGradアルゴリズムは公知の研究に基づいた実装であり、コード自体は独自に作成されたものです)
 
-Disclaimer / 免責事項
-Non-Warranty: This software is provided "as is", without warranty of any kind. (本ソフトウェアは現状のまま提供され、いかなる保証もありません)
-
-Limitation of Liability: In no event shall the author be liable for any claim, damages or other liability arising from the use of this software. (本ソフトウェアの使用により生じたトラブルや損害について、作者は一切の責任を負いかねます)
+Disclaimer / 免責事項<br>
+* Non-Warranty: This software is provided "as is", without warranty of any kind. (本ソフトウェアは現状のまま提供され、いかなる保証もありません)
+* Limitation of Liability: In no event shall the author be liable for any claim, damages or other liability arising from the use of this software. (本ソフトウェアの使用により生じたトラブルや損害について、作者は一切の責任を負いかねます)
 
 issue, PRについて
 趣味の範囲、知の共有を目的とした範囲の対応になります。
