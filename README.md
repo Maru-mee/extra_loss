@@ -34,3 +34,7 @@ sd-scriptsのオプション機能です。<br>
   * loss = train_util.conditional_lossの直後付近へ、<br>
     呼び出し文loss = calc_extra_losses(以下略）の呼び出し文を追加<br>
     通常のloss計算直後に挿入する、という意味です。<br>
+ * もし、ライブラリ不足していた場合は、個別にインストールしてください。sd-scriptsが動作している場合は、おそらくすべてインストール済みと思います。
+   
+補足
+* もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
