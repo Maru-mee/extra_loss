@@ -44,7 +44,7 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 * もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
 * このlossは比較的厳密な学習を求めることを目的に検証しています。ベースモデルの情報を維持したい場合には、やや強すぎるかもしれません。
 
-ライセンス/License
+ライセンス/License<br>
 License: MIT License
 Ownership: This is an original implementation. All code was written by the author. (本コードは作者による自作のオリジナル実装です)
 Technical Reference: The PCGrad algorithm is based on public research. This specific implementation is original. (PCGradアルゴリズムは公知の研究に基づいた実装であり、コード自体は独自に作成されたものです)
