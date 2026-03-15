@@ -15,7 +15,10 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 * PCgrad思想を利用<br>
   * 多数のlossが混在していても、必要なgrad成分だけを抽出し、grad過大によるオーバーシュートを防ぐ<br>
   * 効果の弱いlossをカットオフし、計算速度を向上<br>
-* ε-pred, v-predに対応<br>
+
+・対象
+* SDXLで検証済み。SD1やAnimaといったモデルでも原理的には使用可能と考えています。
+* ε-pred, v-predに対応。
 
 ・使い方<br>
 お手持ちのloss計算直後に、lossをcalc_extra_losses関数で上書きしてください<br>
@@ -40,3 +43,8 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 補足
 * もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
 * このlossは比較的厳密な学習を求めることを目的に検証しています。ベースモデルの情報を維持したい場合には、やや強すぎるかもしれません。
+
+ライセンス/License
+License: MIT License
+Ownership: This is an original implementation. All code was written by the author. (本コードは作者による自作のオリジナル実装です)
+Technical Reference: The PCGrad algorithm is based on public research. This specific implementation is original. (PCGradアルゴリズムは公知の研究に基づいた実装であり、コード自体は独自に作成されたものです)
