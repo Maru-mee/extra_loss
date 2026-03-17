@@ -956,9 +956,6 @@ def combine_losses_dynamically(
                    
     return all_loss
 
-# モジュールレベルにロス履歴を保存するdequeを追加
-_LOSS_BASE_HISTORY = collections.deque(maxlen=20)
-
 def get_loss_all(
     loss_base, 
     target, 
