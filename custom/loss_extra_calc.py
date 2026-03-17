@@ -248,9 +248,6 @@ def calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale):
     # 元の次元数に戻す
     if not is_batched:
         loss = loss.squeeze(0)
-
-    deadband = 0.1
-    loss = torch.nn.functional.relu(loss - deadband)
             
     return loss, pred_norm
     
@@ -346,12 +343,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
         huber_c=huber_c
     )
     
-    deadband = 0.1
-    loss = torch.nn.functional.relu(loss - deadband)
-    
     return loss, pred_flows_flat
-
-
 
 def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
     # 画像単体のpool分割したうえで、それぞれの領域を比較する。
@@ -672,24 +664,22 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
         huber_c=huber_c
     )
     
-    deadband = 0.1
-    loss = torch.nn.functional.relu(loss - deadband)
-
     return loss, rel_pred
     
 #-----------------------------------------
 
 _LOSS_CONFIG = {
-    #名称と、(重み倍率, gamma)
-    # gammaが大きいほど、学習後期よりも学習序盤に寄与する。
-    "base   ": (1.0, 1.0),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool    ": (1.0, 1.0),
-    "ch_cosine": (0.5, 1.0),
-    "ch_flow": (0.5, 1.0),
-    "pair_128px": (0.5, 1.0),
-    "pair_64px": (0.5, 1.0),
-    "batch_pool": (0.5, 1.0), 
-    "batch_cos": (0.5, 1.0), 
+    #名称と、(重み倍率, gamma, deadband)
+    # gamma     ：lossを何乗するか。大きいほど学習後期よりも学習序盤に寄与する。
+    # deadband  ：この閾値以下のlossをカットして、過適合を防ぐ
+    "base   ":  (1.0, 1.0, 0.0),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
+    "pool    ": (1.0, 1.0, 0.0),
+    "ch_cosine": (0.5, 1.0, 0.1),
+    "ch_flow":  (0.5, 1.0, 0.1),
+    "pair_128px": (0.5, 1.0, 0.0),
+    "pair_64px": (0.5, 1.0, 0.0),
+    "batch_pool": (0.5, 1.0, 0.1), 
+    "batch_cos": (0.5, 1.0, 0.1), 
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -728,39 +718,29 @@ def combine_losses_dynamically(
     # 1. 各損失の勾配算出とリスト化
     for i, item in enumerate(losses_list):
         if i < len(_LOSS_NAMES) and item is not None:
-            loss_value_raw, pred = item  # タプルからpredを展開
+            loss_value_raw, pred = item
 
             loss_name = _LOSS_NAMES[i]
-            static_weight, gamma_value = _LOSS_CONFIG.get(loss_name, (1.0, 1.0))
+            static_weight, gamma_value, deadband = _LOSS_CONFIG.get(loss_name, (1.0, 1.0, 0.0))
             
             # 微分対象のテンソルに勾配計算を許可する
             if not pred.requires_grad:
-                pred.requires_grad_(True) 
-            
-            # 特定のlossのデバッグ専用 ---------------------
-            """
-            if loss_name == "grad":
-                if (global_step // 100) % 2 == 0:
-                    # 0-99, 200-299, ... の場合: ON
-                    debug_weight = 1.0
-                else:
-                    # 100-199, 300-399, ... の場合: OFF
-                    debug_weight = 0.0
-                static_weight *= debug_weight
-            """
-            # -------------------------------------------            
+                pred.requires_grad_(True)   
             
             if loss_value_raw is None:
                 continue
                 
             current_loss_mean = loss_value_raw.mean()
+            
+            if deadband > 0.0:
+                loss_value_raw = torch.nn.functional.relu(loss_value_raw - deadband) # deadband未満を切り捨て
 
             dynamic_weight = 1.0
             base_gamma = 1.0
             
             all_weight = static_weight * dynamic_weight
-            all_gamma  = base_gamma * gamma_value
-            
+            all_gamma  = base_gamma * gamma_value            
+                        
             # 重みとガンマを適用したスカラー損失の算出
             # 計算過程で勾配が必要なため、オリジナルのテンソルから計算を開始
             loss_instance = loss_value_raw.clone()
@@ -951,7 +931,7 @@ def combine_losses_dynamically(
                 l_val = l_val.mean().expand_as(total_loss_tensor)
             
             # 各ロスの重みとガンマを適用
-            static_weight, gamma_value = _LOSS_CONFIG.get(_LOSS_NAMES[i], (1.0, 1.0))
+            static_weight, gamma_value, _ = _LOSS_CONFIG.get(_LOSS_NAMES[i], (1.0, 1.0, 0.0))
             total_loss_tensor += (l_val ** gamma_value) * static_weight
 
     # 勾配すり替え：値は total_loss_tensor、勾配は PCGrad後の accumulated_grad
