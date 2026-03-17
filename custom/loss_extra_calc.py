@@ -678,14 +678,12 @@ _LOSS_CONFIG = {
     "ch_flow":  (0.5, 1.0, 0.1),
     "pair_128px": (0.5, 1.0, 0.0),
     "pair_64px": (0.5, 1.0, 0.0),
-    "batch_pool": (0.5, 1.0, 0.1), 
-    "batch_cos": (0.5, 1.0, 0.1), 
+    "batch_pool": (0.5, 1.0, 0.05), 
+    "batch_cos": (0.5, 1.0, 0.05), 
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
 
-# 各ロスの過去20ステップの平均値をfloatで記録する辞書
-_LOSS_HISTORY = {name: collections.deque(maxlen=20) for name in _LOSS_CONFIG.keys()}
     
 def combine_losses_dynamically(
     losses_list: list[torch.Tensor], 
@@ -932,10 +930,13 @@ def combine_losses_dynamically(
             
             total_loss_tensor += l_val
 
-    # 勾配すり替え：値は total_loss_tensor、勾配は PCGrad後の accumulated_grad
-    # これにより、呼び出し側で .mean([1, 2, 3]) をしても正しく勾配が伝播します
-    # accumulated_grad - accumulated_gradは、値は0だが、勾配の計算グラフ（履歴）だけを繋ぐ
-    all_loss = total_loss_tensor + (accumulated_grad - accumulated_grad).detach()
+    # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
+    grad_anchor = next(item[1] for item in losses_list if item is not None)
+
+    # 勾配のすり替え
+    # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
+    all_loss = total_loss_tensor.detach()
+    all_loss += (s := (accumulated_grad * grad_anchor).sum()) - s.detach()
     all_loss += scalar_only_sum
 
     if is_debug_mode_PCgrad:     
@@ -943,16 +944,12 @@ def combine_losses_dynamically(
         reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-8)) * 100
         print(f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
             
-
-        """
-        if is_debug_mode:
-            is_trainable = loss_value.grad_fn is not None
-            is_trainable_all = all_loss.grad_fn is not None            
-            grad_indicator = "● (Grad OK)" if is_trainable else "× (No Grad/Static)"
-            grad_indicator_all = "● (Grad OK)" if is_trainable_all else "× (No Grad/Static)"
-            print(f"勾配追跡可能か：\tloss単体\累計後\t{grad_indicator}\t{grad_indicator_all}")
-        """
-                
+    """
+    if is_debug_mode:
+        is_trainable = all_loss.grad_fn is not None            
+        grad_indicator = "● (Grad OK)" if is_trainable else "× (No Grad/Static)"
+        print(f"勾配追跡可能か：\t累計後\t{grad_indicator}")
+    """        
                    
     return all_loss
 
