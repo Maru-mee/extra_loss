@@ -41,7 +41,7 @@ from custom.loss_extra_calc import calc_extra_losses
                             if args.v_parameterization:
                                 snr_weight = 1.0 / (snr + 1.0)
                             else:
-                                snr_weight = 1.0
+                                snr_weight = torch.ones_like(snr)
                                 
                             snr_weight = 1.0 - snr_weight # 反転処理とdtype変換
                                 
