@@ -930,9 +930,7 @@ def combine_losses_dynamically(
             if l_val.shape != total_loss_tensor.shape:
                 l_val = l_val.mean().expand_as(total_loss_tensor)
             
-            # 各ロスの重みとガンマを適用
-            static_weight, gamma_value, _ = _LOSS_CONFIG.get(_LOSS_NAMES[i], (1.0, 1.0, 0.0))
-            total_loss_tensor += (l_val ** gamma_value) * static_weight
+            total_loss_tensor += l_val
 
     # 勾配すり替え：値は total_loss_tensor、勾配は PCGrad後の accumulated_grad
     # これにより、呼び出し側で .mean([1, 2, 3]) をしても正しく勾配が伝播します
