@@ -757,7 +757,6 @@ def combine_losses_dynamically(
 
             dynamic_weight = 1.0
             base_gamma = 1.0
-            # 250926    base_gamma=0.7→ 0.4
             
             all_weight = static_weight * dynamic_weight
             all_gamma  = base_gamma * gamma_value
