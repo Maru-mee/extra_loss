@@ -27,7 +27,7 @@ _loss_history = []
 """
 _current_snr_weight = None
 _current_mask = None
-_random_seed_1, _random_seed_2, _random_seed_3 = 0, 0, 0
+_random_seed_1 = 0
 
 def get_image_hw(image_tensor):
     """
@@ -212,10 +212,7 @@ def tensor_to_edges(x, is_dist_detect, dtype, device):
     
 #def cal_loss_var(target, noise_pred, args, huber_c, var_method="none"):
     # 削除 2026/3/9
-    
-#def cal_loss_face(loss_base, target, noise_pred, dtype, device, args, huber_c, face_bbox):
-    # 削除 2026/3/9
-    
+       
 #def cal_loss_rgb_bias(target, noise_pred, args, huber_c):
     # 削除 2026/3/9
     
@@ -504,7 +501,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     )
             
     return loss, pred_pairs
-
+    
 def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
@@ -700,7 +697,10 @@ _LOSS_NAMES = list(_LOSS_CONFIG.keys())
 # 各ロスの過去20ステップの平均値をfloatで記録する辞書
 _LOSS_HISTORY = {name: collections.deque(maxlen=20) for name in _LOSS_CONFIG.keys()}
     
-def combine_losses_dynamically(losses_list: list[torch.Tensor], global_step: int, epsilon: float = 1e-6) -> torch.Tensor:
+def combine_losses_dynamically(
+    losses_list: list[torch.Tensor], 
+    global_step,
+) -> torch.Tensor:
     if not losses_list:
         return torch.tensor(0.0, device='cpu')
 
@@ -982,14 +982,17 @@ def combine_losses_dynamically(losses_list: list[torch.Tensor], global_step: int
 # モジュールレベルにロス履歴を保存するdequeを追加
 _LOSS_BASE_HISTORY = collections.deque(maxlen=20)
 
-#def get_loss_all(loss_base, target, noise_pred, args, huber_c, face_bbox):
-def get_loss_all(loss_base, target, noise_pred, args, huber_c):
+def get_loss_all(
+    loss_base, 
+    target, 
+    noise_pred, 
+    args, 
+    huber_c,
+):
     
-    global _random_seed_1, _random_seed_2, _random_seed_3
+    global _random_seed_1
     # 生成用ランダムseed 
     _random_seed_1 = random.randint(0, 2**32 - 1)
-    _random_seed_2 = random.randint(0, 2**32 - 1)
-    _random_seed_3 = random.randint(0, 2**32 - 1)
     
     # 縮小処理をする場合の下限面積[元画像サイズベースのpx単位]
     area_lower_limit_img        = 512 ** 2 
@@ -1038,9 +1041,15 @@ def get_loss_all(loss_base, target, noise_pred, args, huber_c):
     
     return all_computed_losses
     
-def calc_extra_losses(loss, target, noise_pred, args, huber_c, global_step, 
-    accelerator, snr_weight_view,
-    #face_bbox,
+def calc_extra_losses(
+    loss, 
+    target, 
+    noise_pred, 
+    args, 
+    huber_c, 
+    global_step, 
+    accelerator, 
+    snr_weight_view,
     current_mask=None,
 ):
     global _current_snr_weight, _current_mask
@@ -1048,7 +1057,6 @@ def calc_extra_losses(loss, target, noise_pred, args, huber_c, global_step,
     _current_mask = current_mask
     
     # loss値の各種計算
-    #all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c, face_bbox)
     all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c)
     
     """
@@ -1061,7 +1069,7 @@ def calc_extra_losses(loss, target, noise_pred, args, huber_c, global_step,
     # ロスの集計と重み付け
     loss = combine_losses_dynamically(all_computed_losses, global_step)
 
-    # 📌 VRAM解放のため、個々の損失テンソルを削除
+    # VRAM解放のため、個々の損失テンソルを削除
     for l in all_computed_losses:
         if l is not None:
             del l
