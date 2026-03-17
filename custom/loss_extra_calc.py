@@ -434,6 +434,26 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     target_latents = target if is_batched else target.unsqueeze(0)
     pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)
 
+    def apply_distance_weight(i, j, num_grid_w, dtype, device):
+        """
+        グリッド上の距離に応じて重みを生成
+        1マス隣: 3.0倍 / 2マス隣: 2.0倍 / その他: 1.0倍
+        """
+        # インデックスから2次元座標(x, y)を復元
+        dx = (i % num_grid_w - j % num_grid_w).abs().to(dtype)
+        dy = (i // num_grid_w - j // num_grid_w).abs().to(dtype)
+        
+        # 直線距離(ユークリッド距離)に基づいて算出
+        dist = torch.sqrt(dx**2 + dy**2)
+
+        # 1.0(ベース) + 強度 * 指数減衰
+        # dist=1.0 のとき 3.0 になるよう設定
+        strength = 2.0
+        decay = 0.8 
+        weights = 1.0 + strength * torch.exp(-decay * (dist - 1.0))
+        
+        return weights
+
     # サイズから分割数決定
     H, W, _ = get_image_hw(target)
     scale_latents = scale_px / 8 # px → latents
@@ -458,20 +478,23 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     #target_corr = target_corr / num_locations
     #pred_corr = pred_corr / num_locations
 
-    # 重複と自己相関を排除するインデックス抽出
+    # 重複と自己相関を排除するインデックスを抽出。 (B, HW*HW) -> (B, 無効ペアを除外)
     # torch.triu_indices(row, col, offset=1) により、対角成分(0)を除いた上三角のみ取得
     indices = torch.triu_indices(num_locations, num_locations, offset=1, device=device)
-
-    # ベクトルとして抽出 (B, HW*HW) -> (B, 有効ペア数)
-    target_pairs = target_corr[:, indices[0], indices[1]]
-    pred_pairs = pred_corr[:, indices[0], indices[1]]
+    i, j = indices[0], indices[1]  # (i:基準点, j:比較点) 
+    target_pairs = target_corr[:, i, j]
+    pred_pairs   = pred_corr[:, i, j]
+    
+    # 距離重みの取得と適用
+    dist_weight = apply_distance_weight(i, j, num_grid_w, dtype, device)
+    target_pairs = target_pairs * dist_weight
+    pred_pairs   = pred_pairs * dist_weight
     
     # 補正
     boost = 1.0
     target_pairs *= boost
     pred_pairs   *= boost
 
-    # 5. 要素ごとのLoss算出（変数名をlossに統一、引数を2行に分割）
     loss = train_util.conditional_loss(
         pred_pairs, 
         target_pairs,
@@ -481,7 +504,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     )
             
     return loss, pred_pairs
-    
+
 def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
