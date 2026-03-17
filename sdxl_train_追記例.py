@@ -10,7 +10,6 @@ from custom.loss_extra_calc import calc_extra_losses
         #省略
         
         for step, batch in enumerate(train_dataloader):
-            current_step.value = global_step
 
             # 省略
 
@@ -42,7 +41,7 @@ from custom.loss_extra_calc import calc_extra_losses
                             if args.v_parameterization:
                                 snr_weight = 1.0 / (snr + 1.0)
                             else:
-                                snr_weight = one / 1.0
+                                snr_weight = 1.0
                                 
                             snr_weight = 1.0 - snr_weight # 反転処理とdtype変換
                                 
