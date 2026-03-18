@@ -1,5 +1,5 @@
 各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
-sd-scriptsの非公式MODのような位置づけです。<br>
+sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
 ## 目次
 <details>
