@@ -52,7 +52,7 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 お手持ちのloss計算直後に、lossをcalc_extra_losses関数で上書きしてください<br>
 添付の記入例を参考にしてください<br>
 
-* 学習ツール（sd-scriptsなど）のフォルダ内に、任意のフォルダを作成（フォルダ名の例：custom）
+* 学習ツール（sd-scripts）のフォルダ内に、任意のフォルダを作成（フォルダ名の例：custom）
 * customフォルダへ、loss_extra_calc.pyを保存
 * customフォルダへ__init__.pyという、空のファイルを追加
 * 自分が使いたい学習ツール（例：sdxl_train.pyなど）へ、下記を追加
