@@ -385,7 +385,6 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     scale_latents = scale_px / 8 # px → latents
     num_grid_h = int(max(1, H // scale_latents))
     num_grid_w = int(max(1, W // scale_latents))
-    #print(f"scale_latents:\t{scale_latents}\tnum_grid_h/w:\t{num_grid_h}\t{num_grid_w}")
 
     # 1. 空間情報の抽出
     target_small = torch.nn.functional.adaptive_avg_pool2d(target_latents.float(), (num_grid_h, num_grid_w))
@@ -395,24 +394,24 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     target_feat = target_small.flatten(2).transpose(1, 2)
     pred_feat = pred_small.flatten(2).transpose(1, 2)
     
-    # 3. 自己相関行列 (B, HW, HW) の生成
-    target_corr = torch.bmm(target_feat, target_feat.transpose(1, 2))
-    pred_corr = torch.bmm(pred_feat, pred_feat.transpose(1, 2))
+    # 3. 相関行列の生成（要素ごとの差分で番地情報を維持）
+    # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
+    target_corr = target_feat.unsqueeze(2) - target_feat.unsqueeze(1)
+    pred_corr = pred_feat.unsqueeze(2) - pred_feat.unsqueeze(1)
     
-    # 1点あたりの相関強度に落とし込む → 必要なしと判断。どれも重要な変化だし、値が小さくなりすぎる
     num_locations = num_grid_h * num_grid_w
-    #target_corr = target_corr / num_locations
-    #pred_corr = pred_corr / num_locations
 
-    # 重複と自己相関を排除するインデックスを抽出。 (B, HW*HW) -> (B, 無効ペアを除外)
-    # torch.triu_indices(row, col, offset=1) により、対角成分(0)を除いた上三角のみ取得
+    # 重複と自己相関を排除するインデックスを抽出
     indices = torch.triu_indices(num_locations, num_locations, offset=1, device=device)
     i, j = indices[0], indices[1]  # (i:基準点, j:比較点) 
-    target_pairs = target_corr[:, i, j]
-    pred_pairs   = pred_corr[:, i, j]
     
-    # 距離重みの取得と適用
-    dist_weight = apply_distance_weight(i, j, num_grid_w, dtype, device)
+    # チャンネル次元(dim=-1)を保持したままペアを抽出
+    # (B, num_pairs, C)
+    target_pairs = target_corr[:, i, j, :]
+    pred_pairs   = pred_corr[:, i, j, :]
+        
+    # 距離重みの適用
+    dist_weight = apply_distance_weight(i, j, num_grid_w, dtype, device).unsqueeze(-1)
     target_pairs = target_pairs * dist_weight
     pred_pairs   = pred_pairs * dist_weight
     
@@ -425,11 +424,9 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         pred_pairs, 
         target_pairs,
         reduction="none", 
-        loss_type=args.loss_type, 
+        loss_type="l2",  # ほかの関数同様にargs.loss_typeすると差分が検出できず、grad.abs.max = grad.abs.meanになってしまうので、仕方なくL2
         huber_c=huber_c
     )
-    
-    
             
     return loss, pred_pairs
     
@@ -501,16 +498,20 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
             pool_5x = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
             d3_1 = pool_3x - pool_1x
             d5_3 = pool_5x - torch.nn.functional.interpolate(pool_3x, size=(5, 5), mode='bilinear')
-            
+
+            # grad過大にならないように正規化
+            pool_1x = torch.nn.functional.normalize(pool_1x.float(), p=2, dim=1, eps=1e-8)
+            d3_1    = torch.nn.functional.normalize(d3_1.float(),   p=2, dim=1, eps=1e-8)
+            d5_3    = torch.nn.functional.normalize(d5_3.float(),   p=2, dim=1, eps=1e-8)            
                                  
             features = [
                 pool_1x.flatten(1), 
-                (d3_1.flatten(1) * 3.0) / ( 3 ** 2),  # = 個別ブースト3+2合計で５倍。要素数で割って信号を平均化、
-                (d5_3.flatten(1) * 2.0) / ( 5 ** 2),
+                d3_1.flatten(1),
+                d5_3.flatten(1),
             ]
             
             num_features    = 3     # pool_1xとそれ以外の２種類。細かい内訳は、features内で計算
-            boost           = 1.0   # 体感上このくらいがbaseと同程度になる
+            boost           = 1.0   # 体感上このくらいがbaseと同程度のgradになる
 
         elif mode == "pool_tones": # まだ使用不可。研究中。そもそもなくても十分な気もするし、リスキー
             sampling_reso = 20
@@ -572,14 +573,21 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
     feat_target, _, _               = extract_features(target_latents, mode)
     
     # p=1(L1距離)を採用し、特徴量の差分を定義
-    # 類似度という意味では内積方式がいいのだが、L2特性になってしまい、値が過小傾向になってハズレ値ばかり優先されてしまう。
-    # meanではなくsumを使用することで、各誤差の相殺・対消滅を防ぐ
-    rel_pred    = (feat_pred.unsqueeze(1)   - feat_pred.unsqueeze(0)).abs().sum(dim=2)
-    rel_target  = (feat_target.unsqueeze(1) - feat_target.unsqueeze(0)).abs().sum(dim=2)
-    
-    eps = 1e-8 # アンダーフロー対策
-    rel_pred    = (rel_pred + eps) / num_features
-    rel_target  = (rel_target + eps) / num_features
+    # 類似度（内積方式）はL2特性を持つため、値が過小になり外れ値ばかりが優先される傾向がある。
+    # それを避けるため、L1ノルム（vector_norm ord=1）にて各要素の差を忠実に拾う。
+    # また、meanではなくsum（または相当する集計）を使用することで、
+    # 正負の誤差による相殺・対消滅を防ぎ、バッチ内の関係性を確実に勾配へ乗せる。
+    diff_pred   = feat_pred.unsqueeze(1)   - feat_pred.unsqueeze(0)
+    diff_target = feat_target.unsqueeze(1) - feat_target.unsqueeze(0)
+
+    # L1ベクトルノルムとして集計し、要素数で正規化することで勾配爆発を抑制
+    rel_pred = torch.linalg.vector_norm(diff_pred, ord=1, dim=2) / feat_pred.shape[1]
+    rel_target = torch.linalg.vector_norm(diff_target, ord=1, dim=2) / feat_target.shape[1]
+
+    # 数値的安定性のための下限保証（アンダーフローによる勾配消失対策）
+    # 注.clmapで置き換えてしまうと勾配追跡が消失する
+    rel_pred    = rel_pred + 1e-6
+    rel_target  = rel_target + 1e-6
     
     # 5. 対角成分（自己相関で０になってしまう無価値な要素）の除外
     mask = ~torch.eye(batch_size, device=device, dtype=torch.bool)
@@ -601,11 +609,9 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
-    )
+    )    
     
-    
-    
-    return loss, rel_pred
+    return loss, pred_latents # rel_predを使用すると、要素数が極端に少ない状態になるので不可
     
 #-----------------------------------------
 
@@ -615,12 +621,12 @@ _LOSS_CONFIG = {
     # deadband  ：この閾値以下のlossをカットして、過適合を防ぐ
     "base   ":  (1.0, 1.0, 0.0),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "pool    ": (1.0, 1.0, 0.0),
-    "ch_cosine": (0.5, 1.0, 0.1),
-    "ch_flow":  (0.5, 1.0, 0.1),
+    "ch_cosine": (0.5, 1.0, 0.01),
+    "ch_flow":  (0.5, 1.0, 0.01),
     "pair_128px": (0.5, 1.0, 0.0),
     "pair_64px": (0.5, 1.0, 0.0),
-    "batch_pool": (0.5, 1.0, 0.05), 
-    "batch_cos": (0.5, 1.0, 0.05), 
+    "batch_pool": (0.5, 1.0, 0.0), 
+    "batch_cos": (0.5, 1.0, 0.01), 
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -718,8 +724,12 @@ def combine_losses_dynamically(
             )
             if grad_tuple[0] is not None:
                 grad = grad_tuple[0].detach()
-                #print(f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}] ") # for debug
-                grad.clamp_(-1e-5, 1e-5) # SDXL向けの調整
+                
+                # grad clipping (緊急時向け)
+                if global_step % 50 == 1 or is_debug_mode:
+                    print(f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}] ") # for debug
+                
+                # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
 
             else:
                 # グラフがつながっていない場合は、形状を合わせたゼロ勾配を代入
@@ -878,7 +888,7 @@ def combine_losses_dynamically(
             
             total_loss_tensor += l_val
 
-    # 勾配の異常値をインプレースで丸める
+    # 勾配の異常値を丸める
     accumulated_grad.nan_to_num_(nan=0.0, posinf=0.1, neginf=-0.1).clamp_(-0.1, 0.1)
 
     # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
