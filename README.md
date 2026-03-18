@@ -33,7 +33,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 ![260318_08_09](https://github.com/user-attachments/assets/45985a7a-4094-45f6-b94d-01e0f2e36421)
   ポイント：
   * 1girl, standing, full_bodyが、早期に再現及び維持できています。
-  * 正則化画像なしで、初期のモデル破損は最小限に留まっています。
+  * 正則化画像なしですが、初期のモデル破損は最小限に留まっています。
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
 
