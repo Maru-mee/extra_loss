@@ -129,73 +129,6 @@ def filtering_gaussian(x, dtype, device):
 
 # ==============================================================================================
 
-
-def tensor_to_edges(x, is_dist_detect, dtype, device):
-    # --- Canny法 + 距離変換によるエッジ検出（距離マップの生成） ---
-    # x: input_tensor。　例：noise_pred,target
-
-    # NaN/Infを丸める (loss計算前の最終安全策)
-    x = torch.nan_to_num(x, nan=0.0, posinf=1e-4, neginf=0.0)    
-        
-    # 距離変換の設定
-    MAX_DIST_CLIP = 80.0  # 距離の上限 (ラテント空間での約10px相当)
-    GAMMA_DIST = 0.7      # 距離の滑らかさ調整
-
-    x = x.detach().to(torch.float32).cpu().numpy()
-    edges_all = []
-    
-    for i in range(x.shape[0]):
-        img = np.transpose(x[i], (1, 2, 0)) # (C,H,W)→(H,W,C)
-        
-        # 無効な値 (NaN, Inf) が含まれる場所を記録
-        invalid_mask = ~np.isfinite(img).all(axis=2)
-        
-        # 不正値処理とクリッピングを追加
-        img = np.nan_to_num(img, nan=0.0, posinf=1.0, neginf=0.0)
-        img = np.clip(img, 0.0, 1.0)
-        
-        gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-        
-        # 1. Canny法でエッジを検出 (255=エッジ, 0=背景)
-        edges = cv2.Canny(
-            gray, 
-            200, 
-            500,    # latentが対象なので、厳しくなければノイズを拾ってしまう
-            L2gradient=True
-        )
-        
-        if is_dist_detect:
-            # 2. 距離変換のための反転 (0=エッジ, 255=背景)
-            edges_inv = 255 - edges
-            
-            # 3. 距離変換の実行 (エッジ=0.0, 離れるほど値が増加)
-            distance_map = cv2.distanceTransform(
-                edges_inv, 
-                cv2.DIST_L2, 
-                cv2.DIST_MASK_PRECISE
-            )
-            
-            # 4. クリッピングと正規化 （背景は255 → 1.0に変化）
-            distance_map = np.clip(distance_map, 0.0, MAX_DIST_CLIP)
-            normalized_dist = distance_map / MAX_DIST_CLIP
-            
-            # 5. 滑らかさ調整 (ガンマ補正)
-            edges = np.power(normalized_dist, GAMMA_DIST)
-
-        else:
-            edges = edges.astype(np.float32) / 255.0
- 
-        # 無効領域の値を、そのモードの背景色に合わせる
-        if is_dist_detect:
-            edges[invalid_mask] = 1.0  # 距離変換時は 1.0 (最大距離)
-        else:
-            edges[invalid_mask] = 0.0  # 通常時は 0.0 (エッジなし)
-        
-        edges_all.append(edges)
-        
-    edges_all = np.stack(edges_all, axis=0)
-    edges_tensor = torch.from_numpy(edges_all).unsqueeze(1).to(device, dtype=dtype)
-    return edges_tensor
         
 #def cal_loss_edge_dist(target, noise_pred, args, huber_c):
     # 削除 2026/3/9
@@ -248,7 +181,9 @@ def calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale):
     # 元の次元数に戻す
     if not is_batched:
         loss = loss.squeeze(0)
-            
+        
+    
+    
     return loss, pred_norm
     
 #def calc_loss_ch_flow_1(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
@@ -343,6 +278,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
         huber_c=huber_c
     )
     
+    
     return loss, pred_flows_flat
 
 def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
@@ -400,6 +336,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
         loss_type=args.loss_type,
         huber_c=huber_c
     )
+    
 
     return loss, pool_pred
 
@@ -426,7 +363,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     def apply_distance_weight(i, j, num_grid_w, dtype, device):
         """
         グリッド上の距離に応じて重みを生成
-        1マス隣: 3.0倍 / 2マス隣: 2.0倍 / その他: 1.0倍
+        1マス隣: 1.5倍 / その他: 1.0倍に近い値へ減衰
         """
         # インデックスから2次元座標(x, y)を復元
         dx = (i % num_grid_w - j % num_grid_w).abs().to(dtype)
@@ -436,8 +373,8 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         dist = torch.sqrt(dx**2 + dy**2)
 
         # 1.0(ベース) + 強度 * 指数減衰
-        # dist=1.0 のとき 3.0 になるよう設定
-        strength = 2.0
+        # dist=1.0 のとき 1.5 になるよう設定
+        strength = 0.5
         decay = 0.8 
         weights = 1.0 + strength * torch.exp(-decay * (dist - 1.0))
         
@@ -491,6 +428,8 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         loss_type=args.loss_type, 
         huber_c=huber_c
     )
+    
+    
             
     return loss, pred_pairs
     
@@ -570,7 +509,7 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
                 (d5_3.flatten(1) * 2.0) / ( 5 ** 2),
             ]
             
-            num_features    = 2     # pool_1xとそれ以外の２種類。細かい内訳は、features内で計算
+            num_features    = 3     # pool_1xとそれ以外の２種類。細かい内訳は、features内で計算
             boost           = 1.0   # 体感上このくらいがbaseと同程度になる
 
         elif mode == "pool_tones": # まだ使用不可。研究中。そもそもなくても十分な気もするし、リスキー
@@ -663,6 +602,8 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
         loss_type=args.loss_type,
         huber_c=huber_c
     )
+    
+    
     
     return loss, rel_pred
     
@@ -777,6 +718,9 @@ def combine_losses_dynamically(
             )
             if grad_tuple[0] is not None:
                 grad = grad_tuple[0].detach()
+                #print(f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}] ") # for debug
+                grad.clamp_(-1e-5, 1e-5) # SDXL向けの調整
+
             else:
                 # グラフがつながっていない場合は、形状を合わせたゼロ勾配を代入
                 grad = torch.zeros_like(pred).detach()
@@ -837,9 +781,13 @@ def combine_losses_dynamically(
                 # 異方向（干渉対策）
                 # 直交成分だけを残し、干渉成分を相殺する
                 conflict_count += 1
-                                
-                mag_sq = torch.dot(gj_flat, gj_flat) + 1e-8
-                gi_flat = gi_flat - (dot_prod / mag_sq) * gj_flat
+                
+                # mag_sq（勾配の大きさの二乗）が極端に小さい場合に発生する不定形演算を回避                   
+                mag_sq = torch.dot(gj_flat, gj_flat)
+                if mag_sq > 1e-12:
+                    # 補正係数の絶対値を最大1.0に制限し、勾配の爆発を阻止
+                    ratio = torch.clamp(dot_prod / mag_sq, min=-1.0, max=1.0)
+                    gi_flat = gi_flat - ratio * gj_flat
 
             elif dot_prod > 0:
                 # 同方向（オーバーシュート対策）：
@@ -930,13 +878,16 @@ def combine_losses_dynamically(
             
             total_loss_tensor += l_val
 
+    # 勾配の異常値をインプレースで丸める
+    accumulated_grad.nan_to_num_(nan=0.0, posinf=0.1, neginf=-0.1).clamp_(-0.1, 0.1)
+
     # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
     grad_anchor = next(item[1] for item in losses_list if item is not None)
 
     # 勾配のすり替え
     # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
     all_loss = total_loss_tensor.detach()
-    all_loss += (s := (accumulated_grad * grad_anchor).sum()) - s.detach()
+    all_loss += (accumulated_grad * (grad_anchor - grad_anchor.detach())).sum()
     all_loss += scalar_only_sum
 
     if is_debug_mode_PCgrad:     
@@ -1026,7 +977,7 @@ def calc_extra_losses(
     global _current_snr_weight, _current_mask
     _current_snr_weight = snr_weight_view
     _current_mask = current_mask
-    
+        
     # loss値の各種計算
     all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c)
     
