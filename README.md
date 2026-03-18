@@ -2,6 +2,9 @@
 sd-scriptsの非公式MODのような位置づけです。<br>
 
 ## 目次
+<details>
+<summary>Click to expand</summary>
+ 
 * [役割](#役割)
 * [特徴](#特徴)
 * [適用範囲](#適用範囲)
@@ -11,6 +14,9 @@ sd-scriptsの非公式MODのような位置づけです。<br>
 * [ライセンス/License](#ライセンスlicense)
 * [Disclaimer / 免責事項](#disclaimer--免責事項)
 * [issue, PRについて](#issue-prについて)
+
+</details>
+
 
 ## 役割
 * 画像生成AIに対する学習効率の向上。
