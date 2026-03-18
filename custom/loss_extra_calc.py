@@ -182,9 +182,7 @@ def calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale):
     if not is_batched:
         loss = loss.squeeze(0)
         
-    
-    
-    return loss, pred_norm
+    return loss
     
 #def calc_loss_ch_flow_1(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
     # 削除 2026/3/9
@@ -201,7 +199,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
 
     if not is_above_limit:
         # 解像度が低い場合、計算困難な境界影響が強くなり、境界クロップが発生しやすくなる
-        return torch.zeros(1, device=device, dtype=dtype), torch.zeros(1, device=device, dtype=dtype)
+        return torch.zeros(1, device=device, dtype=dtype)
 
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
@@ -279,7 +277,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
     )
     
     
-    return loss, pred_flows_flat
+    return loss
 
 def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
     # 画像単体のpool分割したうえで、それぞれの領域を比較する。
@@ -291,7 +289,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
     
     if not is_above_limit:
         # 解像度が低い場合、信頼性が著しく低下する・・・気がしたけど、いい感じに分割してくれるので、is_above_limit=True運用で問題ない
-        return torch.zeros(1, device=device, dtype=dtype), torch.zeros(1, device=device, dtype=dtype)
+        return torch.zeros(1, device=device, dtype=dtype)
 
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
@@ -309,7 +307,11 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
     
         pool_1x  = torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
         pool_3x  = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
-        pool_5x  = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))        
+        pool_5x  = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
+        
+        pool_1x = torch.nn.functional.normalize(pool_1x.float(), p=2, dim=1, eps=1e-8)
+        pool_3x = torch.nn.functional.normalize(pool_3x.float(), p=2, dim=1, eps=1e-8)
+        pool_5x = torch.nn.functional.normalize(pool_5x.float(), p=2, dim=1, eps=1e-8)
                              
         features = [
             pool_1x.flatten(1), 
@@ -323,7 +325,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
     pool_pred   = extract_features(pred_latents)
     pool_target = extract_features(target_latents)
     
-    boost=1.0 
+    boost = 0.01
     scales = reso_scale * boost
     
     pool_pred.mul_(scales)
@@ -337,8 +339,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
         huber_c=huber_c
     )
     
-
-    return loss, pool_pred
+    return loss
 
 def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
@@ -353,7 +354,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     device = target.device
     
     if not is_above_limit:
-        return torch.zeros(1, device=device, dtype=dtype), torch.zeros(1, device=device, dtype=dtype)
+        return torch.zeros(1, device=device, dtype=dtype)
 
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
@@ -428,7 +429,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         huber_c=huber_c
     )
             
-    return loss, pred_pairs
+    return loss
     
 def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode):
     """
@@ -445,7 +446,7 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
 
     if not is_above_limit:
         # 解像度が低い場合、いくつかの統計値に対する信頼性が著しく低下する
-        return torch.zeros(1, device=device, dtype=dtype), torch.zeros(1, device=device, dtype=dtype)
+        return torch.zeros(1, device=device, dtype=dtype)
         
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
@@ -455,7 +456,7 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
     batch_size = target_latents.shape[0]        
     if batch_size < 2:
         # batch_size = 1なら計算する目的がない
-        return torch.zeros(1, device=device, dtype=dtype), torch.zeros(1, device=device, dtype=dtype)
+        return torch.zeros(1, device=device, dtype=dtype)
         
     def extract_features(x, mode):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
@@ -511,7 +512,7 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
             ]
             
             num_features    = 3     # pool_1xとそれ以外の２種類。細かい内訳は、features内で計算
-            boost           = 1.0   # 体感上このくらいがbaseと同程度のgradになる
+            boost           = 0.01   # 体感上このくらいがbaseと同程度のgradになる
 
         elif mode == "pool_tones": # まだ使用不可。研究中。そもそもなくても十分な気もするし、リスキー
             sampling_reso = 20
@@ -586,8 +587,8 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
 
     # 数値的安定性のための下限保証（アンダーフローによる勾配消失対策）
     # 注.clmapで置き換えてしまうと勾配追跡が消失する
-    rel_pred    = rel_pred + 1e-6
-    rel_target  = rel_target + 1e-6
+    rel_pred    = rel_pred + 1e-10
+    rel_target  = rel_target + 1e-10
     
     # 5. 対角成分（自己相関で０になってしまう無価値な要素）の除外
     mask = ~torch.eye(batch_size, device=device, dtype=torch.bool)
@@ -611,7 +612,7 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
         huber_c=huber_c
     )    
     
-    return loss, pred_latents # rel_predを使用すると、要素数が極端に少ない状態になるので不可
+    return loss
     
 #-----------------------------------------
 
@@ -944,31 +945,32 @@ def get_loss_all(
     dtype = target.dtype
     device = target.device    
 
-    loss_pool, pred_pool = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True)
-    loss_ch_cosine, pred_ch_cosine = calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale)
-    loss_ch_flow, pred_ch_flow = calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_limit)
-    loss_pair_corr_128px, pred_pair_128px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=128)
-    loss_pair_corr_64px, pred_pair_64px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=64)
-    loss_batch_pool, pred_batch_pool = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool")
-    loss_batch_cos, pred_batch_cos = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, mode="ch_cosine")
+    loss_pool = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True)
+    loss_ch_cosine = calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale)
+    loss_ch_flow = calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_limit)
+    loss_pair_corr_128px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=128)
+    loss_pair_corr_64px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=64)
+    loss_batch_pool = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool")
+    loss_batch_cos = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, mode="ch_cosine")
    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
-        (loss_base, noise_pred),
-        (loss_pool, pred_pool),
-        (loss_ch_cosine, pred_ch_cosine),
-        (loss_ch_flow * _current_snr_weight, pred_ch_flow),
-        (loss_pair_corr_128px, pred_pair_128px),
-        (loss_pair_corr_64px, pred_pair_64px),
-        (loss_batch_pool, pred_batch_pool),
-        (loss_batch_cos, pred_batch_cos),
+        loss_base,
+        loss_pool,
+        loss_ch_cosine,
+        loss_ch_flow * _current_snr_weight,
+        loss_pair_corr_128px,
+        loss_pair_corr_64px,
+        loss_batch_pool,
+        loss_batch_cos,
     ]
     
-    # NaN/Inf補正    
+    # NaN/Inf補正およびnoise_predとのペアリング
     all_computed_losses = [
-        (torch.nan_to_num(l, nan=0.0, posinf=1e-4, neginf=0.0), p) if l is not None else None 
-        for l, p in all_computed_losses
+        (torch.nan_to_num(l, nan=0.0, posinf=1e-4, neginf=0.0), noise_pred) 
+        if l is not None else None 
+        for l in all_computed_losses
     ]
     
     return all_computed_losses
