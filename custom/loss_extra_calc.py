@@ -320,8 +320,8 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
         return torch.cat(features, dim=1)
     
     # 特徴抽出と標準化を一括処理
-    pool_pred   = extract_features(target_latents)
-    pool_target = extract_features(pred_latents)
+    pool_pred   = extract_features(pred_latents)
+    pool_target = extract_features(target_latents)
     
     boost=1.0 
     scales = reso_scale * boost
