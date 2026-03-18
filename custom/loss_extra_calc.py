@@ -1,5 +1,6 @@
 
 is_debug_mode           = False
+is_debug_mode_grad      = False
 is_debug_mode_PCgrad    = False
 
 import collections
@@ -723,7 +724,7 @@ def combine_losses_dynamically(
                 grad = grad_tuple[0].detach()
                 
                 # grad clipping (緊急時向け)
-                if global_step % 50 == 1 or is_debug_mode:
+                if global_step % 50 == 1 or is_debug_mode_grad:
                     print(f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}] ") # for debug
                 
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
