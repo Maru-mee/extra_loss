@@ -35,7 +35,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
   * 1girl, standing, full_bodyが、早期に再現できています。
   * 正則化画像なしで、初期のモデル破損は最小限に留まっています。
   * モデル：sd_xl_base_1.0 (Stability_AI)
-  * データセット：https://zunko.jp/con_illust.htmlよりお借りしました。
+  * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
 
 ## 特徴
 * latentsの特性を考慮して最適化したloss群
