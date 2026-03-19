@@ -16,7 +16,6 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 
-import time
 
 
 """
@@ -28,6 +27,21 @@ _loss_history = []
 _current_snr_weight = None
 _current_mask = None
 _random_seed_1 = 0
+
+
+_print_storage = []
+def print_storage(mode, content=None):
+    """
+    print文をまとめて出力することで、print呼び出しによるオーバーヘッドを減らす関数
+    mode = keepで溜めて、mode = printで溜めた文を一気に表示
+    """
+    if mode == "keep":
+        _print_storage.append(str(content))
+    elif mode == "print":
+        if _print_storage:
+            print("\n".join(_print_storage))
+            _print_storage.clear()
+
 
 def get_image_hw(image_tensor):
     """
@@ -708,7 +722,7 @@ def combine_losses_dynamically(
                 bar = loss_bar(loss_instance.mean().item())
                 
                 indent = "\n" if i == 0 else ""
-                print(f"{indent} {loss_name} \tgamma:{base_gamma}*{gamma_value}\tSt_wt:{static_weight:.3f} \tDy_wt:{dynamic_weight:.3f} \tloss補正前/補正後\t{current_loss_mean.item():.3f}/{loss_instance.mean().item():.3f}\t|{bar}|")
+                print_storage("keep", f"{indent} {loss_name} \tgamma:{base_gamma}*{gamma_value}\tSt_wt:{static_weight:.3f} \tDy_wt:{dynamic_weight:.3f} \tloss補正前/補正後\t{current_loss_mean.item():.3f}/{loss_instance.mean().item():.3f}\t|{bar}|")
             
             
             # PCgradの処理---------------------------------------------
@@ -731,7 +745,7 @@ def combine_losses_dynamically(
                 
                 # grad clipping (緊急時向け)
                 if global_step % 50 == 1 or is_debug_mode_grad:
-                    print(f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}] ") # for debug
+                    print_storage("keep", f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
                 
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
 
@@ -907,7 +921,7 @@ def combine_losses_dynamically(
     if is_debug_mode_PCgrad:     
         # PCGrad 統計値の計算
         reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-8)) * 100
-        print(f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
+        print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
             
     """
     if is_debug_mode:
@@ -953,10 +967,7 @@ def get_loss_all(
     loss_ch_flow = calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_limit)
     loss_pair_corr_128px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=128)
     loss_pair_corr_64px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=64)
-    start_time = time.time()
     loss_pair_corr_32px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=32)
-    end_time = time.time()
-    print(f"区間タイム: {end_time - start_time:.4f}sec")
     loss_batch_pool = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool")
     loss_batch_cos = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, mode="ch_cosine")
    
@@ -1007,9 +1018,10 @@ def calc_extra_losses(
         all_loss_values = [f"{l.mean().item():.4f}" for l in all_computed_losses if l is not None]
         accelerator.print(f"loss内訳: {', '.join(all_loss_values)}")
     """
-        
+    
     # ロスの集計と重み付け
     loss = combine_losses_dynamically(all_computed_losses, global_step)
+
 
     # VRAM解放のため、個々の損失テンソルを削除
     for l in all_computed_losses:
