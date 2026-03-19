@@ -38,7 +38,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
   * 【参考】 図はloss_extra_calc_v0.06を使用
-  *<details><summary>キャプション</summary>
+<details><summary>キャプション</summary>
 zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, open mouth, very long hair, weapon, polearm, short kimono, full body, white_background, standing on one leg, dark green hair, looking at viewer, standing, sandals, simple background, sash, tasuki, :d, obi, naginata, geta --d 341 --s 30 --w 1024 --h 1024 --l 4.0
 </details>
 
