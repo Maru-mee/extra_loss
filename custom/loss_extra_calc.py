@@ -16,6 +16,9 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 
+import time
+
+
 """
 # loss記録用
 import openpyxl
@@ -277,10 +280,12 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
     return loss
 
 def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
-    # 画像単体のpool分割したうえで、それぞれの領域を比較する。
-    # これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
-    # 骨格が一致しなければ、あらゆる詳細学習が進まない
-    
+    """
+    画像単体のpool分割したうえで、それぞれの領域を比較する。
+    これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
+    骨格が一致しなければ、あらゆる詳細学習が進まない
+    しかし、平均色化により画面全体が汚くなるので、強い強度での適用は控えたほうがいい
+    """
     dtype = target.dtype
     device = target.device    
     
@@ -623,6 +628,7 @@ _LOSS_CONFIG = {
     "ch_flow":  (0.5, 1.0, 0.01),
     "pair_128px": (0.5, 1.0, 0.0),
     "pair_64px": (0.5, 1.0, 0.0),
+    "pair_32px": (0.5, 1.0, 0.0),
     "batch_pool": (0.5, 1.0, 0.0), 
     "batch_cos": (0.5, 1.0, 0.01), 
 }
@@ -947,6 +953,10 @@ def get_loss_all(
     loss_ch_flow = calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_limit)
     loss_pair_corr_128px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=128)
     loss_pair_corr_64px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=64)
+    start_time = time.time()
+    loss_pair_corr_32px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=32)
+    end_time = time.time()
+    print(f"区間タイム: {end_time - start_time:.4f}sec")
     loss_batch_pool = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool")
     loss_batch_cos = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, mode="ch_cosine")
    
@@ -959,6 +969,7 @@ def get_loss_all(
         loss_ch_flow * _current_snr_weight,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
+        loss_pair_corr_32px,
         loss_batch_pool,
         loss_batch_cos,
     ]
