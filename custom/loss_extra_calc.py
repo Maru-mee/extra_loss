@@ -1,3 +1,10 @@
+# -------------------------------------------
+# loss_extra_calc
+# 画像生成AIにおいて、様々なlossの統計結果を生成します
+# -------------------------------------------
+
+is_print_screen         = True  # Falseにより、一切の画面表示をOFF
+print_interval_step     = 50    # print表示のstep間隔。
 
 is_debug_mode           = False
 is_debug_mode_grad      = False
@@ -16,6 +23,7 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 
+#import time # for debug
 
 
 """
@@ -293,12 +301,12 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
     
     return loss
 
-def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit):
+def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit, pool_num):
     """
     画像単体のpool分割したうえで、それぞれの領域を比較する。
     これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
     骨格が一致しなければ、あらゆる詳細学習が進まない
-    しかし、平均色化により画面全体が汚くなるので、強い強度での適用は控えたほうがいい
+    しかし、latentsにおけるmean比較というのは茶色くなりがちなので、強い強度での適用は控えたほうがいい
     """
     dtype = target.dtype
     device = target.device    
@@ -312,7 +320,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
     target_latents = target if is_batched else target.unsqueeze(0)
     pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)
 
-    def extract_features(x):
+    def extract_features(x, pool_num):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
         
         # (B, C, H, W) -> (B, C, H*W) : チャンネルごとの画素平坦化
@@ -321,25 +329,18 @@ def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit
 
         features = []    
     
-        pool_1x  = torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
-        pool_3x  = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
-        pool_5x  = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
-        
-        pool_1x = torch.nn.functional.normalize(pool_1x.float(), p=2, dim=1, eps=1e-8)
-        pool_3x = torch.nn.functional.normalize(pool_3x.float(), p=2, dim=1, eps=1e-8)
-        pool_5x = torch.nn.functional.normalize(pool_5x.float(), p=2, dim=1, eps=1e-8)
+        pool_x  = torch.nn.functional.adaptive_avg_pool2d(x, (pool_num, pool_num))
+        pool_x = torch.nn.functional.normalize(pool_x.float(), p=2, dim=1, eps=1e-8)
                              
         features = [
-            pool_1x.flatten(1), 
-            pool_3x.flatten(1), 
-            pool_5x.flatten(1), 
+            pool_x.flatten(1), 
         ]
         
         return torch.cat(features, dim=1)
     
     # 特徴抽出と標準化を一括処理
-    pool_pred   = extract_features(pred_latents)
-    pool_target = extract_features(target_latents)
+    pool_pred   = extract_features(pred_latents, pool_num)
+    pool_target = extract_features(target_latents, pool_num)
     
     boost = 0.01
     scales = reso_scale * boost
@@ -447,7 +448,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
             
     return loss
     
-def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode):
+def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode, pool_num=1):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
       各画像が持つ固有の特徴的な差異を学習し、トークンの定着率を高める。
@@ -510,24 +511,16 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
             #       5x5を追加することで、高周波側へ逃がしてしまう力を弱める。
             #       7x7以上はスライス跡が目立つのでやめるべき。縦長or横長では分割困難になる
             
-            pool_1x = torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
-            pool_3x = torch.nn.functional.adaptive_avg_pool2d(x, (3, 3))
-            pool_5x = torch.nn.functional.adaptive_avg_pool2d(x, (5, 5))
-            d3_1 = pool_3x - pool_1x
-            d5_3 = pool_5x - torch.nn.functional.interpolate(pool_3x, size=(5, 5), mode='bilinear')
+            pool_x = torch.nn.functional.adaptive_avg_pool2d(x, (pool_num, pool_num))
 
             # grad過大にならないように正規化
-            pool_1x = torch.nn.functional.normalize(pool_1x.float(), p=2, dim=1, eps=1e-8)
-            d3_1    = torch.nn.functional.normalize(d3_1.float(),   p=2, dim=1, eps=1e-8)
-            d5_3    = torch.nn.functional.normalize(d5_3.float(),   p=2, dim=1, eps=1e-8)            
+            pool_x = torch.nn.functional.normalize(pool_x.float(), p=2, dim=1, eps=1e-8)     
                                  
             features = [
-                pool_1x.flatten(1), 
-                d3_1.flatten(1),
-                d5_3.flatten(1),
+                pool_x.flatten(1), 
             ]
             
-            num_features    = 3     # pool_1xとそれ以外の２種類。細かい内訳は、features内で計算
+            num_features    = 1
             boost           = 0.01   # 体感上このくらいがbaseと同程度のgradになる
 
         elif mode == "pool_tones": # まだ使用不可。研究中。そもそもなくても十分な気もするし、リスキー
@@ -637,13 +630,17 @@ _LOSS_CONFIG = {
     # gamma     ：lossを何乗するか。大きいほど学習後期よりも学習序盤に寄与する。
     # deadband  ：この閾値以下のlossをカットして、過適合を防ぐ
     "base   ":  (1.0, 1.0, 0.0),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool    ": (1.0, 1.0, 0.0),
+    "pool_1x": (0.5, 1.0, 0.0),
+    "pool_3x": (0.5, 1.0, 0.0),
+    "pool_5x": (0.5, 1.0, 0.0),    
     "ch_cosine": (0.5, 1.0, 0.01),
     "ch_flow":  (0.5, 1.0, 0.01),
     "pair_128px": (0.5, 1.0, 0.0),
     "pair_64px": (0.5, 1.0, 0.0),
     "pair_32px": (0.5, 1.0, 0.0),
-    "batch_pool": (0.5, 1.0, 0.0), 
+    "batch_p_1x": (0.5, 1.0, 0.0), 
+    "batch_p_3x": (0.5, 1.0, 0.0),
+    "batch_p_5x": (0.5, 1.0, 0.0),    
     "batch_cos": (0.5, 1.0, 0.01), 
 }
 
@@ -712,7 +709,7 @@ def combine_losses_dynamically(
             
             loss_scalar = loss_instance.mean()
             
-            if global_step % 50 == 0 or is_debug_mode:
+            if global_step % print_interval_step == 0 or is_debug_mode:
                 def loss_bar(loss):
                     max_bar = 10  # 0.05刻みで最大0.5 → 10段階
                     capped_loss = min(loss, 0.5)
@@ -744,7 +741,7 @@ def combine_losses_dynamically(
                 grad = grad_tuple[0].detach()
                 
                 # grad clipping (緊急時向け)
-                if global_step % 50 == 1 or is_debug_mode_grad:
+                if global_step % print_interval_step == 1 or is_debug_mode_grad:
                     print_storage("keep", f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
                 
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
@@ -962,26 +959,34 @@ def get_loss_all(
     dtype = target.dtype
     device = target.device    
 
-    loss_pool = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True)
+    loss_pool_1x = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, pool_num=1)
+    loss_pool_3x = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, pool_num=3)
+    loss_pool_5x = calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, pool_num=5)
     loss_ch_cosine = calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale)
     loss_ch_flow = calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_limit)
     loss_pair_corr_128px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=128)
     loss_pair_corr_64px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=64)
     loss_pair_corr_32px = calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px=32)
-    loss_batch_pool = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool")
+    loss_batch_pool_1x = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool", pool_num=1)
+    loss_batch_pool_3x = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool", pool_num=3)
+    loss_batch_pool_5x = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit, mode="pool", pool_num=5)
     loss_batch_cos = calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_above_limit=True, mode="ch_cosine")
    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
-        loss_pool,
+        loss_pool_1x,
+        loss_pool_3x,
+        loss_pool_5x,
         loss_ch_cosine,
         loss_ch_flow * _current_snr_weight,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
         loss_pair_corr_32px,
-        loss_batch_pool,
+        loss_batch_pool_1x,
+        loss_batch_pool_3x,
+        loss_batch_pool_5x,        
         loss_batch_cos,
     ]
     
@@ -1008,20 +1013,19 @@ def calc_extra_losses(
     global _current_snr_weight, _current_mask
     _current_snr_weight = snr_weight_view
     _current_mask = current_mask
+
+    #start_time = time.time() # for debug  
         
     # loss値の各種計算
     all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c)
-    
-    """
-    # デバッグ（重み補正前）
-    if global_step % 50 == 0:
-        all_loss_values = [f"{l.mean().item():.4f}" for l in all_computed_losses if l is not None]
-        accelerator.print(f"loss内訳: {', '.join(all_loss_values)}")
-    """
-    
+         
     # ロスの集計と重み付け
     loss = combine_losses_dynamically(all_computed_losses, global_step)
+    #end_time = time.time() # for debug
+    #print(f"区間タイム: {end_time - start_time:.4f}sec") # for debug
 
+    if is_print_screen:
+        print_storage("print")
 
     # VRAM解放のため、個々の損失テンソルを削除
     for l in all_computed_losses:
