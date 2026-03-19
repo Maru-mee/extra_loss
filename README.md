@@ -37,7 +37,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
   * 正則化画像なしですが、初期の構造破損は最小限に留まり、連続性のある変化をしています
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
-  * loss_extra_calc_v0.06を使用
+  * 【参考】 図はloss_extra_calc_v0.06を使用
 
 ## 特徴
 * latentsの特性を考慮して最適化したloss群
