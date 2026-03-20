@@ -10,9 +10,7 @@ is_debug_mode           = False
 is_debug_mode_grad      = False
 is_debug_mode_PCgrad    = False
 
-import collections
 import math
-import numpy as np
 import random
 import torch
 import torch.nn.functional
