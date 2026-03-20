@@ -31,7 +31,8 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-![260318_08_260319_02](https://github.com/user-attachments/assets/6717e4fb-1855-4964-bb1e-65aa913900c5)
+![260318_08_260319_02](https://github.com/user-attachments/assets/6717e4fb-1855-4964-bb1e-65aa913900c5)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+
   ポイント：
   * 1girl, standing, full_bodyが、早期に再現及び維持できています。
   * 正則化画像なしですが、初期の構造破損は最小限に留まり、連続性のある変化をしています
