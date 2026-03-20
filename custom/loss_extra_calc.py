@@ -170,6 +170,63 @@ def filtering_gaussian(x, dtype, device):
        
 #def cal_loss_rgb_bias(target, noise_pred, args, huber_c):
     # 削除 2026/3/9
+
+def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit, pool_num):
+    """
+    画像単体のpool分割したうえで、それぞれの領域を比較する。
+    これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
+    骨格が一致しなければ、あらゆる詳細学習が進まない
+    しかし、latentsにおけるmean比較というのは茶色くなりがちなので、強い強度での適用は控えたほうがいい
+    """
+    dtype = target.dtype
+    device = target.device    
+    
+    if not pool_num == 1: # pool_num=1を特別に許可する。平均色の学習としてはどんな解像度でも有意義
+        if not is_above_limit:  # 解像度が低い場合、信頼性が著しく低下する
+            return torch.zeros(1, device=device, dtype=dtype)
+
+    # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
+    is_batched = (target.dim() == 4)
+    target_latents = target if is_batched else target.unsqueeze(0)
+    pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)
+
+    def extract_features(x, pool_num):
+        # 空間情報の抽出：統計量を測定し、特徴を際立たせる
+        
+        # (B, C, H, W) -> (B, C, H*W) : チャンネルごとの画素平坦化
+        x_flat = x.flatten(2)
+        device = x.device
+
+        features = []    
+    
+        pool_x  = torch.nn.functional.adaptive_avg_pool2d(x, (pool_num, pool_num))
+        pool_x = torch.nn.functional.normalize(pool_x.float(), p=2, dim=1, eps=1e-8)
+                             
+        features = [
+            pool_x.flatten(1), 
+        ]
+        
+        return torch.cat(features, dim=1)
+    
+    # 特徴抽出と標準化を一括処理
+    pool_pred   = extract_features(pred_latents, pool_num)
+    pool_target = extract_features(target_latents, pool_num)
+    
+    boost = 0.01
+    scales = reso_scale * boost
+    
+    pool_pred.mul_(scales)
+    pool_target.mul_(scales)
+    
+    loss = train_util.conditional_loss(
+        pool_pred.float(),
+        pool_target.float(),
+        reduction="none",
+        loss_type=args.loss_type,
+        huber_c=huber_c
+    )
+    
+    return loss
     
 def calc_loss_ch_cosine(target, noise_pred, args, huber_c, reso_scale):
     """
@@ -301,63 +358,6 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, reso_scale, is_above_
     
     return loss
 
-def calc_loss_pool(target, noise_pred, args, huber_c, reso_scale, is_above_limit, pool_num):
-    """
-    画像単体のpool分割したうえで、それぞれの領域を比較する。
-    これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
-    骨格が一致しなければ、あらゆる詳細学習が進まない
-    しかし、latentsにおけるmean比較というのは茶色くなりがちなので、強い強度での適用は控えたほうがいい
-    """
-    dtype = target.dtype
-    device = target.device    
-    
-    if not is_above_limit:
-        # 解像度が低い場合、信頼性が著しく低下する・・・気がしたけど、いい感じに分割してくれるので、is_above_limit=True運用で問題ない
-        return torch.zeros(1, device=device, dtype=dtype)
-
-    # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
-    is_batched = (target.dim() == 4)
-    target_latents = target if is_batched else target.unsqueeze(0)
-    pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)
-
-    def extract_features(x, pool_num):
-        # 空間情報の抽出：統計量を測定し、特徴を際立たせる
-        
-        # (B, C, H, W) -> (B, C, H*W) : チャンネルごとの画素平坦化
-        x_flat = x.flatten(2)
-        device = x.device
-
-        features = []    
-    
-        pool_x  = torch.nn.functional.adaptive_avg_pool2d(x, (pool_num, pool_num))
-        pool_x = torch.nn.functional.normalize(pool_x.float(), p=2, dim=1, eps=1e-8)
-                             
-        features = [
-            pool_x.flatten(1), 
-        ]
-        
-        return torch.cat(features, dim=1)
-    
-    # 特徴抽出と標準化を一括処理
-    pool_pred   = extract_features(pred_latents, pool_num)
-    pool_target = extract_features(target_latents, pool_num)
-    
-    boost = 0.01
-    scales = reso_scale * boost
-    
-    pool_pred.mul_(scales)
-    pool_target.mul_(scales)
-    
-    loss = train_util.conditional_loss(
-        pool_pred.float(),
-        pool_target.float(),
-        reduction="none",
-        loss_type=args.loss_type,
-        huber_c=huber_c
-    )
-    
-    return loss
-
 def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     地点間の相関（Self-Correlation）による構造損失。
@@ -369,9 +369,6 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     """
     dtype = target.dtype
     device = target.device
-    
-    if not is_above_limit:
-        return torch.zeros(1, device=device, dtype=dtype)
 
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
@@ -403,16 +400,20 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     scale_latents = scale_px / 8 # px → latents
     num_grid_h = int(max(1, H // scale_latents))
     num_grid_w = int(max(1, W // scale_latents))
+    
+    # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
+    if num_grid_h < 4 or num_grid_w < 4:
+        return torch.zeros(1, device=device, dtype=dtype)
 
-    # 1. 空間情報の抽出
+    # 空間情報の抽出
     target_small = torch.nn.functional.adaptive_avg_pool2d(target_latents.float(), (num_grid_h, num_grid_w))
     pred_small = torch.nn.functional.adaptive_avg_pool2d(pred_latents.float(), (num_grid_h, num_grid_w))
     
-    # 2. 特徴ベクトル化 (B, HW, C)
+    # 特徴ベクトル化 (B, HW, C)
     target_feat = target_small.flatten(2).transpose(1, 2)
     pred_feat = pred_small.flatten(2).transpose(1, 2)
     
-    # 3. 相関行列の生成（要素ごとの差分で番地情報を維持）
+    # 相関行列の生成（要素ごとの差分で番地情報を維持）
     # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
     target_corr = target_feat.unsqueeze(2) - target_feat.unsqueeze(1)
     pred_corr = pred_feat.unsqueeze(2) - pred_feat.unsqueeze(1)
@@ -460,19 +461,32 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
     dtype = target.dtype
     device = target.device    
     
-
-    if not is_above_limit:
-        # 解像度が低い場合、いくつかの統計値に対する信頼性が著しく低下する
-        return torch.zeros(1, device=device, dtype=dtype)
-        
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
     target_latents = target if is_batched else target.unsqueeze(0)
-    pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)          
-        
-    batch_size = target_latents.shape[0]        
+    pred_latents = noise_pred if is_batched else noise_pred.unsqueeze(0)
+    batch_size = target_latents.shape[0]     
+    
+    is_execute_flag = True
+    
     if batch_size < 2:
-        # batch_size = 1なら計算する目的がない
+        # batch_size = 1なら計算する目的が消滅する
+        is_execute_flag = False
+    
+    if not is_above_limit:
+        # 解像度が低い場合、いくつかの統計値に対する信頼性が著しく低下する可能性がある
+        
+        if mode == "pool" and pool_num == 1:
+            # この条件ならば、平均色をbatch比較する意義があるので、skipしたくない
+            pass
+            
+        elif mode=="ch_cosine":
+            # ch_cosineモードであれば、ピクセル同士の比較であるため、解像度に関係なく使用可能
+            pass
+        else:
+            is_execute_flag = False       
+     
+    if not is_execute_flag:
         return torch.zeros(1, device=device, dtype=dtype)
         
     def extract_features(x, mode):
