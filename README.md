@@ -35,7 +35,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
   ポイント：
   * 1girl, standing, full_bodyが、早期に再現及び維持できています。
-  * 正則化画像なしですが、初期の構造破損は最小限に留まり、連続性のある変化をしています
+  * 正則化画像なしですが、初期の構造破損は最小限に留まり、連続性かつ直進性のある変化をしています
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
   * 【参考】 図はloss_extra_calc_v0.06を使用
