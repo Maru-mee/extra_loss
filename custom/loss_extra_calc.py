@@ -526,26 +526,6 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
             
             num_features    = 1
             boost           = 0.01   # 体感上このくらいがbaseと同程度のgradになる
-
-        elif mode == "pool_tones": # まだ使用不可。研究中。そもそもなくても十分な気もするし、リスキー
-            sampling_reso = 20
-            q_list = torch.linspace(0.0, 1.0, sampling_reso, device=device, dtype=torch.float32)
-            b, c, h, w = x.shape
-
-            # 1x1 (全体) の tones
-            x_delta_all = x_flat - x_flat.mean(dim=2, keepdim=True)
-            tones_1x = torch.quantile(x_delta_all.float(), q_list, dim=2).permute(1, 2, 0).flatten(1)
-
-            # 3x3 (局所) の tones
-            grid = 3
-            p = x.unfold(2, h//grid, h//grid).unfold(3, w//grid, w//grid)
-            p = p.contiguous().view(b, c, grid, grid, -1).permute(0, 2, 3, 1, 4)
-            p_delta = p - p.mean(dim=-1, keepdim=True)
-            tones_3x = torch.quantile(p_delta.float(), q_list, dim=-1).permute(1, 2, 3, 4, 0).flatten(1)
-
-            features = [tones_1x, tones_3x]
-            num_features = sampling_reso * (1 + grid * grid)
-            boost = 1.5
             
         elif mode=="ch_cosine":
             # ch_cosineと同等
@@ -846,48 +826,49 @@ def combine_losses_dynamically(
         actual_numel = torch.prod(torch.tensor(orig_s)).item()
         edited_grads.append(efg[:actual_numel].view(orig_s))
 
-    def _accumulate_with_shape_match(target_tensor, source_tensor):
+    def _accumulate_with_shape_match(base_tensor, add_tensor):
         """
         形状の不一致を補正して加算
         """
-        if source_tensor is None or source_tensor.numel() == 0:
-            return target_tensor
+        if add_tensor is None or add_tensor.numel() == 0:
+            return base_tensor
 
         # スカラー(dim=0)や1次元(dim=1)の勾配を弾く
-        if source_tensor.dim() < 2:
-            return target_tensor
+        if add_tensor.dim() < 2:
+            return base_tensor
         
-        eg = source_tensor.clone()
-        if eg.shape != target_tensor.shape:
+        add_t = add_tensor.clone()
+        if add_t.shape != base_tensor.shape:
             # 2Dテンソル (B, C) を (B, C, 1, 1) に展開
-            if eg.dim() == 2:
-                eg = eg.unsqueeze(-1).unsqueeze(-1)
+            if add_t.dim() == 2:
+                add_t  = add_t.unsqueeze(-1).unsqueeze(-1)
             
             # チャンネル数（次元1）の調整
-            if eg.shape[1] != target_tensor.shape[1] and eg.shape[1] > 0:
-                if target_tensor.shape[1] % eg.shape[1] == 0:
-                    repeat_factor = target_tensor.shape[1] // eg.shape[1]
-                    eg = eg.repeat(1, repeat_factor, 1, 1)
+            if add_t.shape[1] != base_tensor.shape[1] and add_t.shape[1] > 0:
+                if base_tensor.shape[1] % add_t .shape[1] == 0:
+                    repeat_factor = base_tensor.shape[1] // add_t.shape[1]
+                    add_t  = add_t.repeat(1, repeat_factor, 1, 1)
                 else:
-                    return target_tensor # 合成不能な場合はそのまま返す
+                    print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_001") # noise_predで統一しているので起こらないはず
+                    return base_tensor 
 
             # 空間解像度 (H, W) のリサイズ
-            if eg.shape[2:] != target_tensor.shape[2:]:
-                if any(s == 0 for s in eg.shape):
-                    return target_tensor
+            if add_t.shape[2:] != base_tensor.shape[2:]:
+                if any(t == 0 for t in add_t.shape):
+                    print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_002")
+                    return base_tensor
                 
-                eg = torch.nn.functional.interpolate(
-                    eg, 
-                    size=target_tensor.shape[2:], 
+                add_t = torch.nn.functional.interpolate(
+                    add_t, 
+                    size=base_tensor.shape[2:], 
                     mode='bilinear', 
                     align_corners=False
                 )
         
-        # 形状一致を確認して加算
-        if eg.shape == target_tensor.shape:
-            target_tensor += eg
+        if add_t.shape == base_tensor.shape: # 形状一致を確認
+            base_tensor += add_t
             
-        return target_tensor
+        return base_tensor
 
     accumulated_grad = torch.zeros_like(grads_list[0])
     for eg in edited_grads:
