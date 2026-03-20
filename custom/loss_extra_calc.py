@@ -23,19 +23,9 @@ from library.custom_train_functions import (
     apply_masked_loss,
 )
 
-#import time # for debug
-
-
-"""
-# loss記録用
-import openpyxl
-import collections
-_loss_history = []
-"""
 _current_snr_weight = None
 _current_mask = None
 _random_seed_1 = 0
-
 
 _print_storage = []
 def print_storage(mode, content=None):
@@ -664,37 +654,33 @@ _LOSS_NAMES = list(_LOSS_CONFIG.keys())
 def combine_losses_dynamically(
     losses_list: list[torch.Tensor], 
     global_step,
-) -> torch.Tensor:
+):
     if not losses_list:
         return torch.tensor(0.0, device='cpu')
-
-    loss_base_current = losses_list[0]       
     
+    # 初期化行程。loss_listの状態を把握したり、変数の初期化を行う --------------------------------
+    
+    # first_valid_loss : 基本情報取得や初期化のために、Noneではないlossを見つける
     first_valid_loss = next(l for l in losses_list if l is not None)
     first_valid_loss_tensor = first_valid_loss[0] if isinstance(first_valid_loss, tuple) else first_valid_loss
     all_loss = torch.zeros_like(first_valid_loss_tensor)
+    
+    device = first_valid_loss_tensor.device 
         
-    num_targetable_losses = 0
-    for i, loss_value_raw in enumerate(losses_list):
-        if i < len(_LOSS_NAMES):
-            if loss_value_raw is not None:
-                num_targetable_losses += 1
+    grads_list = [] # 各lossから算出したgrad
+    base_shape_tensor = None # 基準となる形状（通常は最初の有効なロス）を特定するための準備
+    scalar_only_sum = torch.tensor(0.0, device=device) # PCgradで合成できない、たまに発生するスカラー
     
-    grads_list = []
-    computed_losses_scalar = []
-        
-    # 基準となる形状（通常は最初の有効なロス）を特定するための準備
-    base_shape_tensor = None
     
-    # PCgradで合成できない、たまに発生するスカラー
-    scalar_only_sum = torch.tensor(0.0, device=first_valid_loss_tensor.device)
-    
-    # 1. 各損失の勾配算出とリスト化
+    # 各損失の勾配算出とリスト化 ------------------------------------------------------------
     for i, item in enumerate(losses_list):
         if i < len(_LOSS_NAMES) and item is not None:
+            
             loss_value_raw, pred = item
-
             loss_name = _LOSS_NAMES[i]
+            
+            # 各lossの個別整形 -----------------------------------------------
+            
             static_weight, gamma_value, deadband = _LOSS_CONFIG.get(loss_name, (1.0, 1.0, 0.0))
             
             # 微分対象のテンソルに勾配計算を許可する
@@ -736,7 +722,7 @@ def combine_losses_dynamically(
                 print_storage("keep", f"{indent} {loss_name} \tgamma:{base_gamma}*{gamma_value}\tSt_wt:{static_weight:.3f} \tDy_wt:{dynamic_weight:.3f} \tloss補正前/補正後\t{current_loss_mean.item():.3f}/{loss_instance.mean().item():.3f}\t|{bar}|")
             
             
-            # PCgradの処理---------------------------------------------
+            # calculate loss to grad  ---------------------------------------------
             
             if loss_scalar.grad_fn is None:
                 # 勾配がない場合はスカラーとして蓄積
@@ -765,7 +751,6 @@ def combine_losses_dynamically(
                 grad = torch.zeros_like(pred).detach()
                 
             grads_list.append(grad)
-            computed_losses_scalar.append(loss_scalar)
             
             if base_shape_tensor is None:
                 base_shape_tensor = loss_value_raw
@@ -773,31 +758,39 @@ def combine_losses_dynamically(
     if not grads_list:
         return torch.tensor(0.0, device=losses_list[0].device, requires_grad=True)
 
-    # 2. PCGrad：全勾配間の衝突を並列に解消
-    num_losses = len(grads_list)
+    # Multi-task Learning（MTL）実行前のgradの処理 -------------------
     
-    # 【最適化】二重ループ外で形状情報を整理し、最大要素数でパディングを適用
+    # gradの並び順を定義
+    num_losses = len(grads_list)
+    indices = list(range(num_losses))
+    random.shuffle(indices) # 評価順をシャッフルして、loss並び順の影響を計算結果に与えにくくする
+    
+    # 相互にgradを操作できるように、形状を揃える
+    # 二重ループ外で形状情報を整理し、最大要素数でパディングを適用
     max_numel = max(g.numel() for g in grads_list)
     flat_grads = []
     original_shapes = []
     for g in grads_list:
         original_shapes.append(g.shape)
         g_f = g.reshape(-1)
+        
         if g_f.numel() < max_numel:
             g_f = torch.nn.functional.pad(g_f, (0, max_numel - g_f.numel()))
+            
+        g_f = torch.nan_to_num(g_f, nan=0.0, posinf=0.0, neginf=0.0) # 計算前に nan/inf を 0 に置換（安全装置） 
         flat_grads.append(g_f)
 
-    edited_flat_grads = [g.clone() for g in flat_grads]
-    indices = list(range(num_losses))
-    random.shuffle(indices)
+    flat_grads_2 = [g.clone() for g in flat_grads]
 
     # デバッグ専用統計値
     conflict_count = 0
     total_reduction_norm = 0.0
     original_norms_sum = 0.0
 
+    # PCgradの適用  ---------------------------------------------
+
     for i in indices:
-        gi_flat = edited_flat_grads[i]
+        gi_flat = flat_grads_2[i]
         
         for j in indices:
             if i == j: continue
@@ -806,10 +799,6 @@ def combine_losses_dynamically(
             
             if gi_flat.dtype != gj_flat.dtype:
                 gj_flat = gj_flat.to(gi_flat.dtype)
-                
-            # 計算前に nan/inf を 0 に置換（安全装置）
-            gi_flat = torch.nan_to_num(gi_flat, nan=0.0, posinf=0.0, neginf=0.0)
-            gj_flat = torch.nan_to_num(gj_flat, nan=0.0, posinf=0.0, neginf=0.0)
 
             dot_prod = torch.dot(gi_flat, gj_flat)
 
@@ -848,17 +837,19 @@ def combine_losses_dynamically(
 
         
         # 修正済み平坦化テンソルを格納
-        edited_flat_grads[i] = gi_flat
+        flat_grads_2[i] = gi_flat
 
-    # 【最適化】平坦化したテンソルを元の形状に復元して edited_grads を作成
+    # 平坦化したテンソルを元の形状に復元して edited_grads を作成
     edited_grads = []
-    for k, efg in enumerate(edited_flat_grads):
+    for k, efg in enumerate(flat_grads_2):
         orig_s = original_shapes[k]
         actual_numel = torch.prod(torch.tensor(orig_s)).item()
         edited_grads.append(efg[:actual_numel].view(orig_s))
 
-    # 3. 内部関数：形状の不一致を補正して加算
     def _accumulate_with_shape_match(target_tensor, source_tensor):
+        """
+        形状の不一致を補正して加算
+        """
         if source_tensor is None or source_tensor.numel() == 0:
             return target_tensor
 
@@ -902,7 +893,7 @@ def combine_losses_dynamically(
     for eg in edited_grads:
         accumulated_grad = _accumulate_with_shape_match(accumulated_grad, eg)
     
-    # 4. 最終的なテンソルとしての再構成
+    # 最終的なテンソルとしての再構成
     # 呼び出し側の .mean([1, 2, 3]) に対応するため、スカラー化せず 4次元を維持する
     total_loss_tensor = torch.zeros_like(base_shape_tensor)
     
@@ -932,14 +923,7 @@ def combine_losses_dynamically(
     if is_debug_mode_PCgrad:     
         # PCGrad 統計値の計算
         reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-8)) * 100
-        print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
-            
-    """
-    if is_debug_mode:
-        is_trainable = all_loss.grad_fn is not None            
-        grad_indicator = "● (Grad OK)" if is_trainable else "× (No Grad/Static)"
-        print(f"勾配追跡可能か：\t累計後\t{grad_indicator}")
-    """        
+        print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")    
                    
     return all_loss
 
@@ -1027,16 +1011,12 @@ def calc_extra_losses(
     global _current_snr_weight, _current_mask
     _current_snr_weight = snr_weight_view
     _current_mask = current_mask
-
-    #start_time = time.time() # for debug  
         
     # loss値の各種計算
     all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c)
          
     # ロスの集計と重み付け
     loss = combine_losses_dynamically(all_computed_losses, global_step)
-    #end_time = time.time() # for debug
-    #print(f"区間タイム: {end_time - start_time:.4f}sec") # for debug
 
     if is_print_screen:
         print_storage("print")
