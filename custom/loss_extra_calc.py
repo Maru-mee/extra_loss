@@ -40,7 +40,6 @@ def print_storage(mode, content=None):
             print("\n".join(_print_storage))
             _print_storage.clear()
 
-
 def get_image_hw(image_tensor):
     """
     Tensorから画像の高さ(H)と幅(W)を取得する。
@@ -56,88 +55,6 @@ def get_image_hw(image_tensor):
     area_latents = H * W
     return H, W, area_latents
 
-def apply_adjust_hue_pil(img_pil, angle_degrees):
-    hsv_img = img_pil.convert('HSV')
-    hsv_img_data = list(hsv_img.getdata())                            
-    angle_offset_hsv = int((angle_degrees / 360) * 255)
-    new_hsv_data = []
-    for h, s, v in hsv_img_data:
-        new_h = (h + angle_offset_hsv) % 256
-        new_hsv_data.append((new_h, s, v))                            
-    hsv_img.putdata(new_hsv_data)
-    return hsv_img.convert('RGB')
-
-
-# キャッシュを格納する辞書
-_gauss_ker_cache = collections.defaultdict(dict)
-
-def filtering_gaussian(x, dtype, device):
-    """
-    入力テンソルxにガウシアンフィルタを適用した結果を返します。
-    （元の get_gaussian_kernel 関数の機能を変更）
-
-    Args:
-        x (torch.Tensor): 入力テンソル（noise_predまたはtarget）。(B, C, H, W)
-        dtype (torch.dtype): テンソルのデータ型。
-        device (torch.device): テンソルのデバイス。
-
-    Returns:
-        torch.Tensor: ガウシアンフィルタを適用した結果。
-    """
-    original_dim = x.dim()
-    if original_dim == 3:
-        x_batched = x.unsqueeze(0) # (C, H, W)の場合、バッチ次元を追加して (1, C, H, W) にする
-    elif original_dim == 4:
-        x_batched = x
-    else:
-        raise ValueError("Unsupported tensor dimensions. Expected 3 or 4 dimensions.")
-
-    # フィルタのパラメータ設定 (元の関数から流用)
-    ksize = 7
-    sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
-    channels = x_batched.shape[1]
-    
-    # カーネルのキャッシュキーを生成
-    ksize_tuple = (ksize, ksize)
-    dtype_str = str(dtype)
-
-    # キャッシュをチェック
-    if ksize_tuple in _gauss_ker_cache[sigma] and dtype_str in _gauss_ker_cache[sigma][ksize_tuple]:
-        kernel_2d = _gauss_ker_cache[sigma][ksize_tuple][dtype_str].to(device, dtype=dtype)
-    else:
-        # カーネルの生成（1D）
-        kernel_1d = cv2.getGaussianKernel(ksize, sigma)
-        kernel_1d = torch.from_numpy(kernel_1d).to(dtype).to(device)
-        
-        # 2Dカーネルに変換 (1, 1, H, W)
-        kernel_2d = torch.matmul(kernel_1d, kernel_1d.T).unsqueeze(0).unsqueeze(0)
-
-        # キャッシュに格納 (チャネル軸を持つ前の 2D カーネルを CPU に格納)
-        if ksize_tuple not in _gauss_ker_cache[sigma]:
-            _gauss_ker_cache[sigma][ksize_tuple] = {}
-            
-        _gauss_ker_cache[sigma][ksize_tuple][dtype_str] = kernel_2d.detach().clone().cpu()
-
-    # チャネル数に対応させる (C, 1, H, W)
-    kernel = kernel_2d.repeat(channels, 1, 1, 1)
-    
-    # ガウシアンフィルタを適用
-    # `groups=channels`でチャネルごとの畳み込み、`padding`は ksize から自動計算
-    padding = ksize // 2 
-    
-    filtered_x = torch.nn.functional.conv2d(
-        input=x_batched.float(),
-        weight=kernel.float(),
-        padding=padding, 
-        groups=channels
-    )
-    filtered_x = filtered_x.to(dtype)
-
-    # 元の次元数に戻す
-    if original_dim == 3:
-        filtered_x = filtered_x.squeeze(0) # (1, C, H, W) -> (C, H, W)
-    
-    return filtered_x
 
 # ==============================================================================================
 
