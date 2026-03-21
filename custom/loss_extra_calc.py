@@ -3,12 +3,15 @@
 # 画像生成AIにおいて、様々なlossの統計結果を生成します
 # -------------------------------------------
 
+# 開発者向けオプション -----------------------------------------
 is_print_screen         = True  # Falseにより、一切の画面表示をOFF
 print_interval_step     = 50    # print表示のstep間隔。
 
 is_debug_mode           = False
 is_debug_mode_grad      = False
 is_debug_mode_PCgrad    = False
+is_logging_grad         = False
+# ---------------------------------------------------------
 
 import math
 import random
@@ -20,6 +23,15 @@ import library.train_util as train_util
 from library.custom_train_functions import (
     apply_masked_loss,
 )
+
+if is_logging_grad:        
+    try:
+        from .debug import grad_logger
+    except (ImportError, ValueError):
+        try:
+            import debug.grad_logger as grad_logger
+        except ImportError:
+            print("warning: grad_logger not found in debug folder")        
 
 _current_snr_weight = None
 _current_mask = None
@@ -525,22 +537,24 @@ def calc_loss_batch_relation(target, noise_pred, args, huber_c, reso_scale, is_a
 #-----------------------------------------
 
 _LOSS_CONFIG = {
-    #名称と、(重み倍率, gamma, deadband)
+    #名称と、(重み倍率, gamma, deadband, [カテゴリ, 役割])
     # gamma     ：lossを何乗するか。大きいほど学習後期よりも学習序盤に寄与する。
     # deadband  ：この閾値以下のlossをカットして、過適合を防ぐ
-    "base   ":  (1.0, 1.0, 0.0),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool_1x": (0.5, 1.0, 0.0),
-    "pool_3x": (0.5, 1.0, 0.0),
-    "pool_5x": (0.5, 1.0, 0.0),    
-    "ch_cosine": (0.5, 1.0, 0.01),
-    "ch_flow":  (0.5, 1.0, 0.01),
-    "pair_128px": (0.5, 1.0, 0.0),
-    "pair_64px": (0.5, 1.0, 0.0),
-    "pair_32px": (0.5, 1.0, 0.0),
-    "batch_p_1x": (0.5, 1.0, 0.0), 
-    "batch_p_3x": (0.5, 1.0, 0.0),
-    "batch_p_5x": (0.5, 1.0, 0.0),    
-    "batch_cos": (0.5, 1.0, 0.01), 
+    # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
+    # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
+    "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
+    "pool_1x": (0.5, 1.0, 0.0, ["pool", "base"]),
+    "pool_3x": (0.5, 1.0, 0.0, ["pool", "sub"]),
+    "pool_5x": (0.5, 1.0, 0.0, ["pool", "sub"]),
+    "ch_cosine": (0.5, 1.0, 0.01, [None, None]),
+    "ch_flow":  (0.5, 1.0, 0.01, [None, None]),
+    "pair_128px": (0.5, 1.0, 0.0, ["pair", "base"]),
+    "pair_64px": (0.5, 1.0, 0.0, ["pair", "sub"]),
+    "pair_32px": (0.5, 1.0, 0.0, ["pair", "sub"]),
+    "batch_p_1x": (0.5, 1.0, 0.0, ["batch_pool", "base"]), 
+    "batch_p_3x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
+    "batch_p_5x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
+    "batch_cos": (0.5, 1.0, 0.01, [None, None]),
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -563,6 +577,7 @@ def combine_losses_dynamically(
     device = first_valid_loss_tensor.device 
         
     grads_list = [] # 各lossから算出したgrad
+    valid_grad_indices = []  # losses_listのインデックスのうち、grads_listに入ったもの
     base_shape_tensor = None # 基準となる形状（通常は最初の有効なロス）を特定するための準備
     scalar_only_sum = torch.tensor(0.0, device=device) # PCgradで合成できない、たまに発生するスカラー
     
@@ -576,7 +591,7 @@ def combine_losses_dynamically(
             
             # 各lossの個別整形 -----------------------------------------------
             
-            static_weight, gamma_value, deadband = _LOSS_CONFIG.get(loss_name, (1.0, 1.0, 0.0))
+            static_weight, gamma_value, deadband, _ = _LOSS_CONFIG.get(loss_name, (1.0, 1.0, 0.0, [None, None]))
             
             # 微分対象のテンソルに勾配計算を許可する
             if not pred.requires_grad:
@@ -640,12 +655,21 @@ def combine_losses_dynamically(
                     print_storage("keep", f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
                 
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
+                                  
+                if is_logging_grad:
+                    grad_logger.log_gradient({
+                        "step": global_step,
+                        "name": loss_name.strip(),
+                        "max": grad.abs().max().item(),
+                        "mean": grad.abs().mean().item()
+                    })
 
             else:
                 # グラフがつながっていない場合は、形状を合わせたゼロ勾配を代入
                 grad = torch.zeros_like(pred).detach()
                 
             grads_list.append(grad)
+            valid_grad_indices.append(i)
             
             if base_shape_tensor is None:
                 base_shape_tensor = loss_value_raw
@@ -654,16 +678,11 @@ def combine_losses_dynamically(
         return torch.tensor(0.0, device=losses_list[0].device, requires_grad=True)
 
     # Multi-task Learning（MTL）実行前のgradの処理 -------------------
-    
-    # gradの並び順を定義
-    num_losses = len(grads_list)
-    indices = list(range(num_losses))
-    random.shuffle(indices) # 評価順をシャッフルして、loss並び順の影響を計算結果に与えにくくする
-    
+        
     # 相互にgradを操作できるように、形状を揃える
     # 二重ループ外で形状情報を整理し、最大要素数でパディングを適用
     max_numel = max(g.numel() for g in grads_list)
-    flat_grads = []
+    org_grads = []
     original_shapes = []
     for g in grads_list:
         original_shapes.append(g.shape)
@@ -673,70 +692,157 @@ def combine_losses_dynamically(
             g_f = torch.nn.functional.pad(g_f, (0, max_numel - g_f.numel()))
             
         g_f = torch.nan_to_num(g_f, nan=0.0, posinf=0.0, neginf=0.0) # 計算前に nan/inf を 0 に置換（安全装置） 
-        flat_grads.append(g_f)
+        org_grads.append(g_f)
 
-    flat_grads_2 = [g.clone() for g in flat_grads]
+    edited_grads_temp = [g.clone() for g in org_grads]
 
-    # デバッグ専用統計値
-    conflict_count = 0
-    total_reduction_norm = 0.0
-    original_norms_sum = 0.0
-
-    # PCgradの適用  ---------------------------------------------
-
-    for i in indices:
-        gi_flat = flat_grads_2[i]
+    def _grad_orthogonalization(indices, org_grads, edited_grads_temp, is_same_category = False):
+        """
+        gradの直交化を行い、重複成分を除去する
+        広義ではMTLの操作であり、狭義では、PCgradの思想を使用して独自アレンジしている。
+       
+        indices                 :lossのリストインデックス     
+        org_grads               :平坦化したgradのオリジナル。直交処理のinput
+        edited_grads_temp       :平坦化したgradのclone。直交処理のoutput
+        is_same_category   :比較対象が同一カテゴリかどうか。Trueなら同一
+        """
         
-        for j in indices:
-            if i == j: continue
-            
-            gj_flat = flat_grads[j] # 比較対象は事前平坦化済みテンソル
-            
-            if gi_flat.dtype != gj_flat.dtype:
-                gj_flat = gj_flat.to(gi_flat.dtype)
+        # デバッグ専用統計値
+        conflict_count = 0
+        total_reduction_norm = 0.0
+        original_norms_sum = 0.0
 
-            dot_prod = torch.dot(gi_flat, gj_flat)
+        # PCgradの適用  ---------------------------------------------
 
-            if is_debug_mode_PCgrad:
-                before_norm = torch.norm(gi_flat) # 修正前のノルムを記録
+        # 同一カテゴリ内の処理（Duplicate除去）の場合、役割に基づいてソート
+        if is_same_category:
+            def get_priority(idx):
+                name = _LOSS_NAMES[valid_grad_indices[idx]]
+                role = _LOSS_CONFIG[name][3][1]
+                return 0 if role == "base" else 1
             
-            if dot_prod < 0:
-                # 異方向（干渉対策）
-                # 直交成分だけを残し、干渉成分を相殺する
-                conflict_count += 1
+            # indices自体を、baseが先頭に来るよう並び替える
+            indices.sort(key=get_priority)
+        else:
+            random.shuffle(indices) # 評価順をシャッフルして、loss並び順の影響を計算結果に与えにくくする            
+
+        for i in indices:
+            gi_flat = edited_grads_temp[i]
+            
+            for j in indices:
+                if i == j: continue
                 
-                # mag_sq（勾配の大きさの二乗）が極端に小さい場合に発生する不定形演算を回避                   
-                mag_sq = torch.dot(gj_flat, gj_flat)
-                if mag_sq > 1e-12:
-                    # 補正係数の絶対値を最大1.0に制限し、勾配の爆発を阻止
-                    ratio = torch.clamp(dot_prod / mag_sq, min=-1.0, max=1.0)
-                    gi_flat = gi_flat - ratio * gj_flat
+                if is_same_category:
+                    role_i = _LOSS_CONFIG[_LOSS_NAMES[valid_grad_indices[i]]][3][1]
+                    role_j = _LOSS_CONFIG[_LOSS_NAMES[valid_grad_indices[j]]][3][1]
+                    # subをbaseで削る組み合わせ以外はすべてスキップ
+                    if not (role_i == "sub" and role_j == "base"):
+                        continue
 
-            elif dot_prod > 0:
-                # 同方向（オーバーシュート対策）：
-                # 単純加算による「二重の押し込み」を防ぎ、強い方の要求を優先する
-                gi_flat = torch.where(
-                    torch.abs(gi_flat) > torch.abs(gj_flat),
-                    gi_flat,
-                    gj_flat
-                )
-            else:
-                # 直交、またはどちらかの勾配が0の場合は干渉も重複もないためスキップ
-                pass
+                if is_debug_mode_PCgrad:
+                    if is_same_category:
+                        name_i = _LOSS_NAMES[valid_grad_indices[i]]
+                        name_j = _LOSS_NAMES[valid_grad_indices[j]]
+                        role_i = _LOSS_CONFIG[name_i][3][1]
+                        role_j = _LOSS_CONFIG[name_j][3][1]
+                        print_storage("keep", f" [Check] {name_i}({role_i}) vs {name_j}({role_j})")
                 
-            if is_debug_mode_PCgrad:                    
-                # 修正後のノルムとの差分から「カットされた量」を蓄積
-                after_norm = torch.norm(gi_flat)
-                total_reduction_norm += abs((before_norm - after_norm).item())
-                original_norms_sum += before_norm.item()
+                gj_flat = org_grads[j] # 比較対象は事前平坦化済みテンソル
+                
+                if gi_flat.dtype != gj_flat.dtype:
+                    gj_flat = gj_flat.to(gi_flat.dtype)
 
+                dot_prod = torch.dot(gi_flat, gj_flat)
+
+                if is_debug_mode_PCgrad:
+                    before_norm = torch.norm(gi_flat) # 修正前のノルムを記録
+
+                if dot_prod > 0 or is_same_category:
+                    # 単純加算による「二重の押し込み」を防ぎ、強い方の要求を優先するモード
+                    # 適用条件：同方向（オーバーシュート対策）または、同一カテゴリモード
+
+                    if is_same_category:
+                        my_role = _LOSS_CONFIG[_LOSS_NAMES[valid_grad_indices[i]]][3][1]
+                        target_role = _LOSS_CONFIG[_LOSS_NAMES[valid_grad_indices[j]]][3][1]
+                        if my_role == "base" and target_role == "sub":
+                            continue
+                    
+                    gi_flat = torch.where(
+                        torch.abs(gi_flat) > torch.abs(gj_flat),
+                        gi_flat,
+                        gj_flat
+                    )
+                    
+                elif dot_prod < 0:
+                    # 直交成分だけを残し、干渉成分を相殺するモード
+                    # 適用条件：異方向（干渉対策）
+
+                    conflict_count += 1
+                    
+                    # mag_sq（勾配の大きさの二乗）が極端に小さい場合に発生する不定形演算を回避                   
+                    mag_sq = torch.dot(gj_flat, gj_flat)
+                    if mag_sq > 1e-12:
+                        # 補正係数の絶対値を最大1.0に制限し、勾配の爆発を阻止
+                        ratio = torch.clamp(dot_prod / mag_sq, min=-1.0, max=1.0)
+                        gi_flat = gi_flat - ratio * gj_flat
+
+                else:
+                    # 直交、またはどちらかの勾配が0の場合は干渉も重複もないためスキップ
+                    pass
+                    
+                if is_debug_mode_PCgrad:                    
+                    # 修正後のノルムとの差分から「カットされた量」を蓄積
+                    after_norm = torch.norm(gi_flat)
+                    total_reduction_norm += abs((before_norm - after_norm).item())
+                    original_norms_sum += before_norm.item()
+
+            # 修正済み平坦化テンソルを格納
+            edited_grads_temp[i] = gi_flat
+
+        if is_debug_mode_PCgrad:            
+            # PCGrad 統計値の計算
+            reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-8)) * 100
+            print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
         
-        # 修正済み平坦化テンソルを格納
-        flat_grads_2[i] = gi_flat
+        return edited_grads_temp
 
-    # 平坦化したテンソルを元の形状に復元して edited_grads を作成
+    # grad直交化 ---------------------------------
+    
+    # 同一カテゴリ同士の直交化（重複除去）
+    
+    # カテゴリ分類
+    cat_group = {}
+    for list_idx, loss_idx in enumerate(valid_grad_indices):
+        loss_name = _LOSS_NAMES[loss_idx]
+        cat_name = _LOSS_CONFIG[loss_name][3][0]
+        if cat_name is not None:
+            if cat_name not in cat_group:
+                cat_group[cat_name] = []
+            cat_group[cat_name].append(list_idx)      
+
+    # 各カテゴリ間で直交化
+    for cat_name, indices_category in cat_group.items():
+        if len(indices_category) > 1:
+            edited_grads_temp = _grad_orthogonalization(
+                indices_category, 
+                org_grads, 
+                edited_grads_temp, 
+                is_same_category=True
+            )
+    org_grads = [g.clone() for g in edited_grads_temp] # カテゴリ計算の結果を反映
+
+    # 全gradに対して直交化
+    indices_full = list(range(len(grads_list)))
+    edited_grads_temp = _grad_orthogonalization(
+        indices_full, 
+        org_grads,
+        edited_grads_temp, 
+        is_same_category = False
+    )
+
+    # 平坦化したテンソルを元の形状に復元して edited_grads を作成 --------------------------
     edited_grads = []
-    for k, efg in enumerate(flat_grads_2):
+    for k, efg in enumerate(edited_grads_temp):
         orig_s = original_shapes[k]
         actual_numel = torch.prod(torch.tensor(orig_s)).item()
         edited_grads.append(efg[:actual_numel].view(orig_s))
@@ -814,12 +920,7 @@ def combine_losses_dynamically(
     # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
     all_loss = total_loss_tensor.detach()
     all_loss += (accumulated_grad * (grad_anchor - grad_anchor.detach())).sum()
-    all_loss += scalar_only_sum
-
-    if is_debug_mode_PCgrad:     
-        # PCGrad 統計値の計算
-        reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-8)) * 100
-        print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")    
+    all_loss += scalar_only_sum   
                    
     return all_loss
 
