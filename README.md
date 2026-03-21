@@ -31,14 +31,14 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-![260318_08_260320_01](https://github.com/user-attachments/assets/c3347eaa-b5e1-4884-8337-bccdd5944e5c)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+![v0_08_02_and_base](https://github.com/user-attachments/assets/3d991a9d-2238-453a-8b5b-f0b727826b78)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
-  * standing, full_body, weaponタグが、早期に再現及び維持できています。
-  * 正則化画像なしですが、初期の構造破損は最小限に留まり、連続性かつ直進性のある変化をしています
+  * full_body, weaponを握る手が、早期に再現及び維持できています。
+  * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、連続性かつ直進性のある変化をしています
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
-  * 【参考】 図はloss_extra_calc_v0.07を使用
+  * 【参考】 図はloss_extra_calc_v0.08を使用
 <details><summary>キャプション</summary>
 zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, open mouth, very long hair, weapon, polearm, short kimono, full body, white_background, standing on one leg, dark green hair, looking at viewer, standing, sandals, simple background, sash, tasuki, :d, obi, naginata, geta --d 341 --s 30 --w 1024 --h 1024 --l 4.0
 </details>
