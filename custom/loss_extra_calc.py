@@ -614,7 +614,7 @@ def combine_losses_dynamically(
             # 重みとガンマを適用したスカラー損失の算出
             # 計算過程で勾配が必要なため、オリジナルのテンソルから計算を開始
             loss_instance = loss_value_raw.clone()
-            loss_instance **= all_gamma
+            loss_instance = torch.pow(loss_instance + 1e-8, all_gamma) # **= all_gammaと同義だが、NaN対策として必須
             loss_instance *= all_weight
             
             loss_scalar = loss_instance.mean()
