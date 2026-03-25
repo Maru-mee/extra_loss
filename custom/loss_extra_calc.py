@@ -394,7 +394,7 @@ def calc_loss_batch_relation(
 
             features = [x_flat]
             
-            boost   = 1e-5
+            boost   = 1e-4
                        
         elif mode=="tones":
             # 輝度の階層別比較。
@@ -483,8 +483,14 @@ def calc_loss_batch_relation(
                 diff_target = feat_target.unsqueeze(1) - feat_target.unsqueeze(0)
 
                 # L1ベクトルノルムとして集計し、勾配爆発を抑制
-                rel_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
-                rel_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
+                if mode=="pixel":
+                    # pixelに関しては、勾配の強弱がdiffにないため、gradが定数にならないようにL2化にする
+                    # diff_predが (B, B, C, H*W) なので、(C, H*W) の次元（dim=(2, 3)）を対象にノルムを計算し、(B, B) にする
+                    rel_pred    = torch.linalg.vector_norm(diff_pred, ord=2, dim=(2, 3))
+                    rel_target  = torch.linalg.vector_norm(diff_target, ord=2, dim=(2, 3))
+                else:
+                    rel_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
+                    rel_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
                 
                 # 5. 対角成分（自己相関で０になってしまう無価値な要素）の除外
                 # ペア単位(2x2)の計算のため、sizeは常に2
@@ -536,7 +542,7 @@ _LOSS_CONFIG = {
     "batch_p_3x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_p_5x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
     #"batch_cos": (0.5, 1.0, 0.01, [None, None]),
-    "batch_px": (0.1, 1.0, 0.0, [None, None]),    
+    "batch_px": (0.5, 1.0, 0.0, [None, None]),    
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
