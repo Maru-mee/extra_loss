@@ -13,6 +13,8 @@ is_debug_mode_PCgrad    = False
 is_logging_grad         = False
 # ---------------------------------------------------------
 
+import collections
+import cv2
 import math
 import random
 import torch
@@ -68,23 +70,64 @@ def get_image_hw(image_tensor):
     area_img = area_latents * 64
     return H, W, area_latents, area_img
 
-def convert_to_refined_latents(x):
+# キャッシュを格納する辞書
+_gauss_ker_cache = collections.defaultdict(dict)
+def filtering_gaussian(x):
     """
-    latentsにふさわしい適切なベクトルに変換する
-    
-    対数圧縮を用いる
-    対数圧縮がSDXLのlatents特性と一致する理由
-        latentsは通常、平均0の正規分布に従う
-        ただし、エッジや強い光源などは、極端な外れ値として出力される特性を持つ
-        対数圧縮は、分布の中心付近の微細な強弱関係をそのまま維持する
-        同時に、外れ値による誤差の爆発を防ぎ、特定のピクセルが学習を独占するのを抑制する
+    入力テンソルxにガウシアンフィルタを適用した結果を返します。
+    （元の get_gaussian_kernel 関数の機能を変更）
+
+    Args:
+        x (torch.Tensor): 入力テンソル（noise_predまたはtarget）。(B, C, H, W)
+        dtype (torch.dtype): テンソルのデータ型。
+        device (torch.device): テンソルのデバイス。
+
+    Returns:
+        torch.Tensor: ガウシアンフィルタを適用した結果。
     """
+
+    # フィルタのパラメータ設定 (元の関数から流用)
+    ksize = 3
+    sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
+    channels = x.shape[1]
     
-    # 各ピクセル（チャンネル方向）のL2ノルムを算出
-    norm = torch.linalg.vector_norm(x, ord=2, dim=1, keepdim=True)
-    scale = torch.log1p(norm) / (norm + 1e-10)
+    # カーネルのキャッシュキーを生成
+    ksize_tuple = (ksize, ksize)
+    dtype_str = str(_dtype)
+
+    # キャッシュをチェック
+    if ksize_tuple in _gauss_ker_cache[sigma] and dtype_str in _gauss_ker_cache[sigma][ksize_tuple]:
+        kernel_2d = _gauss_ker_cache[sigma][ksize_tuple][dtype_str].to(_device, dtype=_dtype)
+    else:
+        # カーネルの生成（1D）
+        kernel_1d = cv2.getGaussianKernel(ksize, sigma)
+        kernel_1d = torch.from_numpy(kernel_1d).to(_dtype).to(_device)
+        
+        # 2Dカーネルに変換 (1, 1, H, W)
+        kernel_2d = torch.matmul(kernel_1d, kernel_1d.T).unsqueeze(0).unsqueeze(0)
+
+        # キャッシュに格納 (チャネル軸を持つ前の 2D カーネルを CPU に格納)
+        if ksize_tuple not in _gauss_ker_cache[sigma]:
+            _gauss_ker_cache[sigma][ksize_tuple] = {}
+            
+        _gauss_ker_cache[sigma][ksize_tuple][dtype_str] = kernel_2d.detach().clone().cpu()
+
+    # チャネル数に対応させる (C, 1, H, W)
+    kernel = kernel_2d.repeat(channels, 1, 1, 1)
     
-    return x.mul(scale)
+    # ガウシアンフィルタを適用
+    # `groups=channels`でチャネルごとの畳み込み、`padding`は ksize から自動計算
+    padding = ksize // 2 
+    
+    filtered_x = torch.nn.functional.conv2d(
+        input=x.float(),
+        weight=kernel.float(),
+        padding=padding, 
+        groups=channels
+    )
+    filtered_x = filtered_x.to(_dtype)
+    
+    return filtered_x
 
 # ==============================================================================================
 
@@ -108,7 +151,7 @@ def convert_to_refined_latents(x):
 #def cal_loss_rgb_bias(target, noise_pred, args, huber_c):
     # 削除 2026/3/9
 
-def calc_loss_pool(target, noise_pred, target_mod_2, pred_mod_2, args, huber_c, is_above_limit, pool_num):
+def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     """
     画像単体のpool分割したうえで、それぞれの領域を比較する。
     これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
@@ -132,8 +175,8 @@ def calc_loss_pool(target, noise_pred, target_mod_2, pred_mod_2, args, huber_c, 
         return torch.cat(features, dim=1)
     
     # 特徴抽出と標準化を一括処理
-    pool_pred   = extract_features(pred_mod_2, pool_num)
-    pool_target = extract_features(target_mod_2, pool_num)
+    pool_pred   = extract_features(target, pool_num)
+    pool_target = extract_features(noise_pred, pool_num)
     
     boost = 0.1
     scales = boost
@@ -259,7 +302,38 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
     
     return loss
 
-def calc_loss_pair_correlation(target, noise_pred, target_mod_2, pred_mod_2, args, huber_c, is_above_limit, scale_px):
+def calc_loss_ch_sparsity(target, noise_pred, args, huber_c):
+    """
+    チャンネル間の情報の尖り具合（スパース性）を同期させる。
+    一般的なloss_MSEは、茶色やグレー単色の画像を好む。なぜならば、それが最も手軽に到達できる平均解であるため。
+    このlossは、必要な尖り状態があるかを評価することで、安易な平均色化へペナルティをかける
+    光源などの発色を得るために効果的
+    
+    使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため、target,noise_predには必ずガウシアンフィルタを予め適用しておくこと
+    """
+    eps = 1e-10
+
+    l1_pred = torch.abs(noise_pred).sum(dim=1)
+    l1_target = torch.abs(target).sum(dim=1)
+    
+    l2_pred = torch.sqrt(torch.pow(noise_pred, 2).sum(dim=1) + eps)
+    l2_target = torch.sqrt(torch.pow(target, 2).sum(dim=1) + eps) 
+    
+    sparsity_pred = l1_pred / l2_pred
+    sparsity_target = l1_target / l2_target
+
+    # 既存の共通関数を用いて損失を算出
+    loss = train_util.conditional_loss(
+        sparsity_pred.float(),
+        sparsity_target.float(),
+        reduction="none",
+        loss_type=args.loss_type,
+        huber_c=huber_c
+    )
+
+    return loss    
+
+def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     地点間の相関（Self-Correlation）による構造損失。
     1枚の画像内の全座標をペアにして関係性を網羅（総当たり方式）することで、
@@ -300,8 +374,8 @@ def calc_loss_pair_correlation(target, noise_pred, target_mod_2, pred_mod_2, arg
         return torch.zeros(1, device=_device, dtype=_dtype)
     
     # 空間情報の抽出
-    target_small = torch.nn.functional.adaptive_avg_pool2d(target_mod_2.float(), (num_grid_h, num_grid_w))
-    pred_small = torch.nn.functional.adaptive_avg_pool2d(pred_mod_2.float(), (num_grid_h, num_grid_w))
+    target_small = torch.nn.functional.adaptive_avg_pool2d(target.float(), (num_grid_h, num_grid_w))
+    pred_small = torch.nn.functional.adaptive_avg_pool2d(noise_pred.float(), (num_grid_h, num_grid_w))
     
     # 特徴ベクトル化 (B, HW, C)
     target_feat = target_small.flatten(2).transpose(1, 2)
@@ -344,8 +418,7 @@ def calc_loss_pair_correlation(target, noise_pred, target_mod_2, pred_mod_2, arg
     return loss
     
 def calc_loss_batch_relation(
-    target, noise_pred, target_mod_2, pred_mod_2, 
-    args, huber_c, is_above_limit, mode, pool_num=1,
+    target, noise_pred, args, huber_c, is_above_limit, mode, pool_num=1,
 ):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
@@ -382,7 +455,7 @@ def calc_loss_batch_relation(
     if not is_execute_flag:
         return torch.zeros(1, device=_device, dtype=_dtype)
         
-    def extract_features(x, x_mod_2, mode):
+    def extract_features(x, mode):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
         
         # (B, C, H, W) -> (B, C, H*W) : チャンネルごとの画素平坦化
@@ -421,7 +494,7 @@ def calc_loss_batch_relation(
             #       5x5を追加することで、高周波側へ逃がしてしまう力を弱める。
             #       7x7以上はスライス跡が目立つのでやめるべき。縦長or横長では分割困難になる
                         
-            pool_x = torch.nn.functional.adaptive_avg_pool2d(x_mod_2.float(), (pool_num, pool_num))
+            pool_x = torch.nn.functional.adaptive_avg_pool2d(x.float(), (pool_num, pool_num))
                                  
             features = [
                 pool_x.flatten(1), 
@@ -471,8 +544,8 @@ def calc_loss_batch_relation(
                 #print_storage("keep", f"calc loss_batch_relation\tbatch{i} vs batch{j}")
                 
                 # 特徴抽出と標準化を一括処理
-                feat_pred, boost  = extract_features(noise_pred[indices], pred_mod_2[indices], mode)
-                feat_target, _    = extract_features(target[indices], target_mod_2[indices], mode)
+                feat_pred, boost  = extract_features(noise_pred[indices], mode)
+                feat_target, _    = extract_features(target[indices], mode)
                 
                 # p=1(L1距離)を採用し、特徴量の差分を定義
                 # 類似度（内積方式）はL2特性を持つため、値が過小になり外れ値ばかりが優先される傾向がある。
@@ -534,15 +607,15 @@ _LOSS_CONFIG = {
     "pool_3x": (0.5, 1.0, 0.0, ["pool", "sub"]),
     "pool_5x": (0.5, 1.0, 0.0, ["pool", "sub"]),
     "ch_cosine": (0.5, 1.0, 0.01, [None, None]),
-    "ch_flow":  (0.5, 1.0, 0.01, [None, None]),
+    "ch_flow":  (0.5, 1.0, 0.0, [None, None]),
+    "ch_sparsity":  (0.5, 1.0, 0.0, [None, None]),
     "pair_128px": (0.5, 1.0, 0.0, ["pair", "base"]),
     "pair_64px": (0.5, 1.0, 0.0, ["pair", "sub"]),
     "pair_32px": (0.5, 1.0, 0.0, ["pair", "sub"]),
     "batch_p_1x": (0.5, 1.0, 0.0, ["batch_pool", "base"]), 
     "batch_p_3x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_p_5x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
-    #"batch_cos": (0.5, 1.0, 0.01, [None, None]),
-    "batch_px": (0.5, 1.0, 0.0, [None, None]),    
+    "batch_px": (0.5, 1.0, 0.0, [None, None]),
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -998,50 +1071,44 @@ def get_loss_all(
     target_mod = target if is_batched else target.unsqueeze(0)
     pred_mod = noise_pred if is_batched else noise_pred.unsqueeze(0)
     
-    #target_mod_2    = convert_to_refined_latents(target_mod)
-    #pred_mod_2      = convert_to_refined_latents(pred_mod)  
+    # 過適合の心配があるloss向けに、gaussianフィルタをかける
+    # 適用条件： poolを使用しない関数であること（あるならば適用しても意味がない）。
+    # ピクセル比較を重要視しているloss(使用したら存在意義を失う)。
+    # いくら上記を満たそうとも、ピクセル比較系lossが多すぎると、過適合になる。そのため、一部のピクセル系lossは妥協して適用させるべき
+    target_gaus    = filtering_gaussian(target_mod)
+    pred_gaus      = filtering_gaussian(pred_mod)  
     
     loss_pool_1x, loss_pool_3x, loss_pool_5x = [
         calc_loss_pool(
-            target_mod, pred_mod, target_mod, pred_mod, 
-            args, huber_c, is_above_limit=True, pool_num=n
+            target_mod, pred_mod, args, huber_c, is_above_limit=True, pool_num=n
         )
         for n in [1, 3, 5]
     ]
     
     loss_ch_cosine = calc_loss_ch_cosine(target_mod, pred_mod, args, huber_c)
     loss_ch_flow = calc_loss_ch_flow_2(
-        target_mod, pred_mod, 
-        args, huber_c, is_above_limit
+        target_gaus, pred_gaus, args, huber_c, is_above_limit
     )
+    
+    loss_ch_sparsity = calc_loss_ch_sparsity(target_gaus, pred_gaus, args, huber_c)
     
     loss_pair_corr_128px, loss_pair_corr_64px, loss_pair_corr_32px = [
         calc_loss_pair_correlation(
-            target_mod, pred_mod, target_mod, pred_mod, 
-            args, huber_c, is_above_limit, scale_px=s
+            target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=s
         )
         for s in [128, 64, 32]
     ]
     
     loss_batch_pool_1x, loss_batch_pool_3x, loss_batch_pool_5x = [
         calc_loss_batch_relation(
-            target_mod, pred_mod, target_mod, pred_mod, 
-            args, huber_c, is_above_limit, mode="pool", pool_num=n,
+            target_mod, pred_mod, args, huber_c, is_above_limit, mode="pool", pool_num=n,
         )
         for n in [1, 3, 5]
     ]
     
-    """  
-    # loss_batch_pxがほぼ上位互換なので、機能OFF
-    loss_batch_cos = calc_loss_batch_relation(
-        target_mod, pred_mod, target_mod, pred_mod, 
-        args, huber_c, is_above_limit=True, mode="ch_cosine",
-    ) # target_mod_2, pred_mod_2は使わないけど、positional arguments対策で代入だけしておく
-    """
     loss_batch_pixel = calc_loss_batch_relation(
-        target_mod, pred_mod, target_mod, pred_mod, 
-        args, huber_c, is_above_limit=True, mode="pixel",
-    ) # target_mod_2, pred_mod_2は使わないけど、positional arguments対策で代入だけしておく
+        target_gaus, pred_gaus, args, huber_c, is_above_limit=True, mode="pixel",
+    )
    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
@@ -1052,13 +1119,13 @@ def get_loss_all(
         loss_pool_5x,
         loss_ch_cosine,
         loss_ch_flow * _current_snr_weight,
+        loss_ch_sparsity,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
         loss_pair_corr_32px,
         loss_batch_pool_1x,
         loss_batch_pool_3x,
         loss_batch_pool_5x,        
-        #loss_batch_cos,
         loss_batch_pixel,
     ]
     
