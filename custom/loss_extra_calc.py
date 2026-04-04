@@ -464,7 +464,9 @@ def calc_loss_batch_relation(
         features = []
 
         if mode=="pixel":
-
+            # ToDo: ピクセルそのものを比較するという観点では、高ノイズ領域では。なぜならばbatchごとにノイズが異なるため。
+            # ノイズ問題さえなければ原理的には最強なので、解決するまでは残しておきたい。代替機能の導入を検討したいところ
+            
             features = [x_flat]
             
             boost   = 1e-4
@@ -516,7 +518,21 @@ def calc_loss_batch_relation(
             features = [x_norm]
             
             boost   = 1e-4    # 1e-5で通常通り。ちょっと効果が弱いので、1e-4
-                        
+
+        elif mode=="ch_sparsity":   
+
+            eps=1e-16
+            
+            l1_pred = torch.abs(x).sum(dim=1)            
+            l2_pred = torch.sqrt(torch.pow(x, 2).sum(dim=1) + eps)            
+            x_sparsity = l1_pred / l2_pred
+             
+            features = [
+                x_sparsity.flatten(1),
+            ]
+            
+            boost   = 1e-5  # 1e-3だと強すぎ, 1e-4でもgradの値としては大きい
+            
         elif mode=="others": 
             # 基本的には使わない、過去の統計値
             #mean = torch.mean(x, dim=(2, 3))  # 全体的な色味や明るさのトーン → 画像が茶色くなる原因かもしれない、ボツ
@@ -616,6 +632,7 @@ _LOSS_CONFIG = {
     "batch_p_3x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_p_5x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_px": (0.5, 1.0, 0.0, [None, None]),
+    "batch_spars": (0.5, 1.0, 0.0, [None, None]),    
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -1109,6 +1126,10 @@ def get_loss_all(
     loss_batch_pixel = calc_loss_batch_relation(
         target_gaus, pred_gaus, args, huber_c, is_above_limit=True, mode="pixel",
     )
+    
+    loss_batch_sparsity = calc_loss_batch_relation(
+        target_gaus, pred_gaus, args, huber_c, is_above_limit=True, mode="ch_sparsity",
+    )    
    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
@@ -1127,6 +1148,7 @@ def get_loss_all(
         loss_batch_pool_3x,
         loss_batch_pool_5x,        
         loss_batch_pixel,
+        loss_batch_sparsity
     ]
     
     # NaN/Inf補正およびnoise_predとのペアリング
