@@ -620,9 +620,7 @@ def calc_loss_batch_relation(
                     huber_c=huber_c
                 )    
                 
-                # 元のバッチインデックスへSumで還元
-                total_loss_relation[i] += loss.sum()
-                total_loss_relation[j] += loss.sum()
+                total_loss_relation += loss.sum()
 
     return total_loss_relation
     
