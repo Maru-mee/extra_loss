@@ -319,8 +319,17 @@ def calc_loss_ch_sparsity(target, noise_pred, args, huber_c):
     l2_pred = torch.sqrt(torch.pow(noise_pred, 2).sum(dim=1) + eps)
     l2_target = torch.sqrt(torch.pow(target, 2).sum(dim=1) + eps) 
     
-    sparsity_pred = l1_pred / l2_pred
-    sparsity_target = l1_target / l2_target
+    # ベース設計。L2の値次第で不安定になる可能性があるので廃止
+    # sparsity_pred = l1_pred / l2_pred
+    # sparsity_target = l1_target / l2_target
+    
+    l1_pred = torch.clamp(l1_pred, min=eps)
+    l2_pred = torch.clamp(l2_pred, min=eps)
+    l1_target = torch.clamp(l1_target, min=eps)
+    l2_target = torch.clamp(l2_target, min=eps)    
+    
+    sparsity_pred = torch.log(l1_pred) - torch.log(l2_pred)
+    sparsity_target = torch.log(l1_target) - torch.log(l2_target)
 
     # 既存の共通関数を用いて損失を算出
     loss = train_util.conditional_loss(
@@ -418,7 +427,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     return loss
     
 def calc_loss_batch_relation(
-    target, noise_pred, args, huber_c, is_above_limit, mode, pool_num=1,
+    target, noise_pred, args, huber_c, area_latents, is_above_limit, mode, pool_num=1,
 ):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
@@ -469,7 +478,8 @@ def calc_loss_batch_relation(
             
             features = [x_flat]
             
-            boost   = 1e-4
+            boost   = 1.0
+            norm    = area_latents
                        
         elif mode=="tones":
             # 輝度の階層別比較。
@@ -502,7 +512,8 @@ def calc_loss_batch_relation(
                 pool_x.flatten(1), 
             ]
             
-            boost   = 1e-3
+            boost   = 1.0
+            norm    = pool_num ** 2
             
         elif mode=="ch_cosine":
             # ch_cosineと同等
@@ -517,21 +528,27 @@ def calc_loss_batch_relation(
 
             features = [x_norm]
             
-            boost   = 1e-4    # 1e-5で通常通り。ちょっと効果が弱いので、1e-4
+            boost   = 1.0
+            norm    = area_latents            
 
         elif mode=="ch_sparsity":   
 
             eps=1e-16
             
-            l1_pred = torch.abs(x).sum(dim=1)            
-            l2_pred = torch.sqrt(torch.pow(x, 2).sum(dim=1) + eps)            
-            x_sparsity = l1_pred / l2_pred
-             
+            x_l1 = torch.abs(x).sum(dim=1)            
+            x_l2 = torch.sqrt(torch.pow(x, 2).sum(dim=1))     
+
+            x_l1 = torch.clamp(x_l1, min=eps)
+            x_l2 = torch.clamp(x_l2, min=eps)
+            
+            x_sparsity = torch.log(x_l1) - torch.log(x_l2)
+            
             features = [
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 1e-5  # 1e-3だと強すぎ, 1e-4でもgradの値としては大きい
+            boost   = 1.0
+            norm    = area_latents
             
         elif mode=="others": 
             # 基本的には使わない、過去の統計値
@@ -546,8 +563,9 @@ def calc_loss_batch_relation(
                 #std,
             ])
             boost = 1.0
+            norm    = area_latents
             
-        return torch.cat(features, dim=1), boost         
+        return torch.cat(features, dim=1), boost, norm        
     
     # snrが同等の全batchペア走査
     for i in range(batch_size):
@@ -560,8 +578,8 @@ def calc_loss_batch_relation(
                 #print_storage("keep", f"calc loss_batch_relation\tbatch{i} vs batch{j}")
                 
                 # 特徴抽出と標準化を一括処理
-                feat_pred, boost  = extract_features(noise_pred[indices], mode)
-                feat_target, _    = extract_features(target[indices], mode)
+                feat_pred, boost, norm  = extract_features(noise_pred[indices], mode)
+                feat_target, _, norm    = extract_features(target[indices], mode)
                 
                 # p=1(L1距離)を採用し、特徴量の差分を定義
                 # 類似度（内積方式）はL2特性を持つため、値が過小になり外れ値ばかりが優先される傾向がある。
@@ -581,20 +599,18 @@ def calc_loss_batch_relation(
                     rel_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
                     rel_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
                 
-                # 5. 対角成分（自己相関で０になってしまう無価値な要素）の除外
+                # 補正
+                # boost : 学習効果を調整する効果
+                # norm  : 要素数などによる正規化
+                scales = boost / norm
+                rel_pred = rel_pred.mul(scales)
+                rel_target = rel_target.mul(scales)
+                
+                # 対角成分（自己相関で０になってしまう無価値な要素）の除外
                 # ペア単位(2x2)の計算のため、sizeは常に2
                 mask = ~torch.eye(2, device=_device, dtype=torch.bool)
                 rel_pred    = rel_pred[mask]
                 rel_target  = rel_target[mask]
-                
-                # 補正。
-                # これがないと値が小さすぎて、使い物にならない
-                # ここで掛けるブーストは、合算時の重み倍率とは違い、L2対象をL1へ引き上げる効果も生まれる(ハズレ以外も学べる)
-                # トークン分離能力を高めるには、重み倍率1.0では到底足りないか？
-                # 260303 boost 3.0→10.0 トークンを学ぶ力が足りないので、増加。10は大きすぎ、1は小さすぎ
-                scales = boost
-                rel_pred.mul_(scales)
-                rel_target.mul_(scales)
 
                 loss = train_util.conditional_loss(
                     rel_pred.float(),
@@ -1118,17 +1134,17 @@ def get_loss_all(
     
     loss_batch_pool_1x, loss_batch_pool_3x, loss_batch_pool_5x = [
         calc_loss_batch_relation(
-            target_mod, pred_mod, args, huber_c, is_above_limit, mode="pool", pool_num=n,
+            target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", pool_num=n,
         )
         for n in [1, 3, 5]
     ]
     
     loss_batch_pixel = calc_loss_batch_relation(
-        target_gaus, pred_gaus, args, huber_c, is_above_limit=True, mode="pixel",
+        target_gaus, pred_gaus, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
     )
     
     loss_batch_sparsity = calc_loss_batch_relation(
-        target_gaus, pred_gaus, args, huber_c, is_above_limit=True, mode="ch_sparsity",
+        target_gaus, pred_gaus, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
     )    
    
     # 統合するlossをリスト化する。
