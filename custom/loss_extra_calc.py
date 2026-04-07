@@ -454,12 +454,11 @@ def calc_loss_batch_relation(
         if mode == "pool" and pool_num == 1:
             # この条件ならば、平均色をbatch比較する意義があるので、skipしたくない
             pass
-            
-        elif mode=="ch_cosine":
-            # ch_cosineモードであれば、ピクセル同士の比較であるため、解像度に関係なく使用可能
-            pass
+        elif mode=="ch_cosine" or mode=="pixel" or mode=="ch_sparsity":
+            # これらのモードであればピクセル同士の比較であるため、解像度に関係なく使用可能
+            pass          
         else:
-            is_execute_flag = False       
+            is_execute_flag = False
      
     if not is_execute_flag:
         return torch.zeros(1, device=_device, dtype=_dtype)
@@ -512,7 +511,7 @@ def calc_loss_batch_relation(
                 pool_x.flatten(1), 
             ]
             
-            boost   = 1.0
+            boost   = 0.01 # 基本的にpoolによるbatch比較は、評価する領域が粗いせいか、gradがやたら大きくなりやすく、等倍だと支配的になりすぎる
             norm    = pool_num ** 2
             
         elif mode=="ch_cosine":
