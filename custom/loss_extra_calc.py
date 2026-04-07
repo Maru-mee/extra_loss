@@ -795,7 +795,8 @@ def combine_losses_dynamically(
                 
                 # grad clipping (緊急時向け)
                 if global_step % print_interval_step == 1 or is_debug_mode_grad:
-                    print_storage("keep", f" Grad abs_max,mean:\t{grad.abs().max().item():.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
+                    abs_min_val = grad.abs().where(grad != 0, torch.tensor(float('inf'), device=_device)).min().item()
+                    print_storage("keep", f" grad:abs_max,min,mean:\t{grad.abs().max().item():.2e}\t{abs_min_val:.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
                 
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
                                   
@@ -975,7 +976,9 @@ def combine_losses_dynamically(
     org_grads = [g.clone() for g in edited_grads_temp] # カテゴリ計算の結果を反映
 
     # 全gradに対して直交化
-    indices_full = list(range(len(grads_list)))
+    # indices_full = list(range(len(grads_list))) # 【参考】全gradを対象とする場合
+    indices_full = [k for k in range(len(grads_list)) if "base" not in _LOSS_NAMES[valid_grad_indices[k]]] # baseのみ対象外とする
+
     edited_grads_temp = _grad_orthogonalization(
         indices_full, 
         org_grads,
@@ -1063,7 +1066,7 @@ def combine_losses_dynamically(
     # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
     all_loss = total_loss_tensor.detach()
     all_loss += (accumulated_grad * (grad_anchor - grad_anchor.detach())).sum()
-    all_loss += scalar_only_sum   
+    all_loss += scalar_only_sum
                    
     return all_loss
 
