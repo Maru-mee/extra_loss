@@ -546,7 +546,7 @@ def calc_loss_batch_relation(
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 1.0
+            boost   = 0.01
             norm    = area_latents
             
         elif mode=="others": 
