@@ -1,4 +1,4 @@
-各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
+![ON_OFF比較](https://github.com/user-attachments/assets/68f81c42-e940-4981-bcb5-94a0a181edad)各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
 sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
 ## 目次
@@ -31,11 +31,11 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-![ON_OFF比較](https://github.com/user-attachments/assets/d137a284-641c-4536-bb11-dd4ae76ac9c7)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+![ON_OFF比較](https://github.com/user-attachments/assets/d8589a17-311c-471f-9ba0-212580908813)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
-  * full_body, weaponを握る手が、早期に再現及び維持できています。
-  * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、連続性かつ直進性のある変化をしています
+  * full_body, ポーズ, 画風が、早期に再現及び維持できています。
+  * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、一貫性のある変化をしています
   * 発色がより鮮やかになります。
   * 上記サンプル画像における学習改善の影響が、データセット全体に対する認識力改善に寄与します。
   * モデル：sd_xl_base_1.0 (Stability_AI)
