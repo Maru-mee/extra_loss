@@ -1,4 +1,4 @@
-![ON_OFF比較](https://github.com/user-attachments/assets/68f81c42-e940-4981-bcb5-94a0a181edad)各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
+各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
 sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
 ## 目次
