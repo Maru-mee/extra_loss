@@ -1,3 +1,4 @@
+
 各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
 sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
@@ -31,16 +32,18 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
+![ON_OFF比較](https://github.com/user-attachments/assets/d719a2ed-4f82-4e05-9baf-0009aad92b86)
 ![ON_OFF比較](https://github.com/user-attachments/assets/d8589a17-311c-471f-9ba0-212580908813)<img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
   * full_body, ポーズ, 画風が、早期に再現及び維持できています。
+  * 構造と無関係なノイズ感が低下します。
   * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、一貫性のある変化をしています
   * 発色がより鮮やかになります。
   * 上記サンプル画像における学習改善の影響が、データセット全体に対する認識力改善に寄与します。
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
-  * 【参考】 図はloss_extra_calc_v0.11を使用
+  * 【参考】 図はloss_extra_calc_v0.12,v0.11を使用
 <details><summary>キャプション</summary>
 zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, open mouth, very long hair, weapon, polearm, short kimono, full body, white_background, standing on one leg, dark green hair, looking at viewer, standing, sandals, simple background, sash, tasuki, :d, obi, naginata, geta --d 341 --s 30 --w 1024 --h 1024 --l 4.0
 </details>
