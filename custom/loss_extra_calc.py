@@ -769,8 +769,9 @@ def combine_losses_dynamically(
                     return bar
                 bar = loss_bar(current_loss_instance_mean)
                 
-                indent = "\n" if i == 0 else ""
-                print_storage("keep", f"{indent} {loss_name} \tgamma:{base_gamma}*{gamma_value}\tSt_wt:{static_weight:.3f} \tDy_wt:{dynamic_weight:.3f} \tloss補正前/補正後\t{current_loss_mean.item():.3f}/{current_loss_instance_mean:.3f}\t|{bar}|")
+                if i == 0:
+                    print_storage("keep", f"\n loss_name\tgamma\t\tSt_weight\tDy_weight\tloss補正前/補正後")
+                print_storage("keep", f" {loss_name} \t{base_gamma}*{gamma_value}\t\t{static_weight:.3f}\t\t{dynamic_weight:.3f}\t\t{current_loss_mean.item():.3f}/{current_loss_instance_mean:.3f}\t|{bar}|")
             
             loss_scalar = loss_instance.mean()
             
@@ -792,11 +793,18 @@ def combine_losses_dynamically(
             if grad_tuple[0] is not None:
                 grad = grad_tuple[0].detach()
                 
-                # grad clipping (緊急時向け)
-                if global_step % print_interval_step == 1 or is_debug_mode_grad:
-                    abs_min_val = grad.abs().where(grad != 0, torch.tensor(float('inf'), device=_device)).min().item()
-                    print_storage("keep", f" grad:abs_max,min,mean:\t{grad.abs().max().item():.2e}\t{abs_min_val:.2e}\t{grad.abs().mean().item():.2e}\t[{loss_name.strip()}]") # for debug
-                
+                if global_step % print_interval_step == 1 or is_debug_mode_grad:                    
+                    if grad.any():
+                        # 0の除く最小絶対値を使用。基本的にgradの絶対最小値は０なので、０除外しないと役立たない
+                        abs_min_val = grad[grad != 0].abs().min().item()
+                    else:
+                        abs_min_val = 0.0
+                    
+                    if i == 0:
+                        print_storage("keep", f"\n grad_abs\tmax\t\tmin\t\tmean")
+                    print_storage("keep", f" {loss_name} \t{grad.abs().max().item():.2e}\t{abs_min_val:.2e}\t{grad.abs().mean().item():.2e}")
+
+                # grad clipping (緊急時向け)                
                 # grad.clamp_(-1e-5, 1e-5) # SDXL向けの緊急時専用ブレーキ
                                   
                 if is_logging_grad:
