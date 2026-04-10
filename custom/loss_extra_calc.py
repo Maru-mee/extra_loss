@@ -129,27 +129,27 @@ def filtering_gaussian(x):
     
     return filtered_x
 
+def adaptive_avg_pool2d_for_latents(input, output_size):
+    """
+    latentsに最適化したadaptive_avg_pool2d
+    adaptive_avg_pool2dは平均しか評価せず、latentsの大きい変化を評価できない。
+    ｓｔdを追加することで、latentsの統計値を評価できるようにする。
+    
+    引数の定義：
+        torch.nn.functional.adaptive_avg_pool2dと同じ
+    """
+    eps = 1e-10
+
+    # inputとその2乗をチャネル方向に結合して、プール計算を一回にまとめる
+    combined = torch.cat([input, input.pow(2)], dim=1)
+    pooled = torch.nn.functional.adaptive_avg_pool2d(combined, output_size)
+
+    mean, mean_sq = torch.chunk(pooled, 2, dim=1)
+    std = torch.sqrt(mean_sq - mean.pow(2) + eps)
+    
+    return mean + std
+
 # ==============================================================================================
-
-        
-#def cal_loss_edge_dist(target, noise_pred, args, huber_c):
-    # 削除 2026/3/9
-
-#def cal_loss_edge_match(target, noise_pred, args, huber_c):
-    # 削除 2026/3/9  
-    
-#def cal_loss_grad(target, noise_pred, args, huber_c):
-    # 削除 2026/3/9
-
-#_fft_cache = {} 
-#def cal_loss_fft_amp(target, noise_pred, args, huber_c, fft_slice_count):
-    # 削除 2026/3/9
-    
-#def cal_loss_var(target, noise_pred, args, huber_c, var_method="none"):
-    # 削除 2026/3/9
-       
-#def cal_loss_rgb_bias(target, noise_pred, args, huber_c):
-    # 削除 2026/3/9
 
 def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     """
@@ -166,7 +166,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     def extract_features(x, pool_num):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
                     
-        pool_x  = torch.nn.functional.adaptive_avg_pool2d(x.float(), (pool_num, pool_num))
+        pool_x  = adaptive_avg_pool2d_for_latents(x.float(), (pool_num, pool_num))
                              
         features = [
             pool_x.flatten(1), 
@@ -383,8 +383,8 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         return torch.zeros(1, device=_device, dtype=_dtype)
     
     # 空間情報の抽出
-    target_small = torch.nn.functional.adaptive_avg_pool2d(target.float(), (num_grid_h, num_grid_w))
-    pred_small = torch.nn.functional.adaptive_avg_pool2d(noise_pred.float(), (num_grid_h, num_grid_w))
+    target_small = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
+    pred_small = adaptive_avg_pool2d_for_latents(noise_pred.float(), (num_grid_h, num_grid_w))
     
     # 特徴ベクトル化 (B, HW, C)
     target_feat = target_small.flatten(2).transpose(1, 2)
@@ -505,7 +505,7 @@ def calc_loss_batch_relation(
             #       5x5を追加することで、高周波側へ逃がしてしまう力を弱める。
             #       7x7以上はスライス跡が目立つのでやめるべき。縦長or横長では分割困難になる
                         
-            pool_x = torch.nn.functional.adaptive_avg_pool2d(x.float(), (pool_num, pool_num))
+            pool_x = adaptive_avg_pool2d_for_latents(x.float(), (pool_num, pool_num))
                                  
             features = [
                 pool_x.flatten(1), 
@@ -632,20 +632,18 @@ _LOSS_CONFIG = {
     # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool_1x": (0.5, 1.0, 0.0, ["pool", "base"]),
-    "pool_3x": (0.5, 1.0, 0.0, ["pool", "sub"]),
-    "pool_5x": (0.5, 1.0, 0.0, ["pool", "sub"]),
-    "ch_cosine": (0.5, 1.0, 0.01, [None, None]),
-    "ch_flow":  (0.5, 1.0, 0.0, [None, None]),
+    "pool_3x": (1.0, 1.0, 0.0, ["pool", "base"]),
+    "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
+    "ch_cosine": (1.0, 1.0, 0.01, [None, None]),
+    "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
     "ch_sparsity":  (1.0, 1.0, 0.0, [None, None]),
-    "pair_128px": (0.5, 1.0, 0.0, ["pair", "base"]),
-    "pair_64px": (0.5, 1.0, 0.0, ["pair", "sub"]),
+    "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
+    "pair_64px": (1.0, 1.0, 0.0, ["pair", "sub"]),
     "pair_32px": (1.0, 1.0, 0.0, ["pair", "sub"]),
-    "batch_p_1x": (0.5, 1.0, 0.0, ["batch_pool", "base"]), 
-    "batch_p_3x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
-    "batch_p_5x": (0.5, 1.0, 0.0, ["batch_pool", "sub"]),
-    "batch_px": (0.5, 1.0, 0.0, [None, None]),
-    "batch_spars": (0.5, 1.0, 0.0, [None, None]),    
+    "batch_p_3x": (1.0, 1.0, 0.0, ["batch_pool", "base"]),
+    "batch_p_5x": (1.0, 1.0, 0.0, ["batch_pool", "sub"]),
+    "batch_px": (1.0, 1.0, 0.0, [None, None]),
+    "batch_spars": (1.0, 1.0, 0.0, [None, None]),    
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -983,8 +981,8 @@ def combine_losses_dynamically(
     org_grads = [g.clone() for g in edited_grads_temp] # カテゴリ計算の結果を反映
 
     # 全gradに対して直交化
-    # indices_full = list(range(len(grads_list))) # 【参考】全gradを対象とする場合
-    indices_full = [k for k in range(len(grads_list)) if "base" not in _LOSS_NAMES[valid_grad_indices[k]]] # baseのみ対象外とする
+    indices_full = list(range(len(grads_list)))
+    #indices_full = [k for k in range(len(grads_list)) if "base" not in _LOSS_NAMES[valid_grad_indices[k]]] # 【ボツ案】baseのみ対象外とする場合。base単体の学習効果が100step時点で明らかに失われ、ディティール学習が困難になる
 
     edited_grads_temp = _grad_orthogonalization(
         indices_full, 
@@ -1119,11 +1117,11 @@ def get_loss_all(
     target_gaus    = filtering_gaussian(target_mod)
     pred_gaus      = filtering_gaussian(pred_mod)  
     
-    loss_pool_1x, loss_pool_3x, loss_pool_5x = [
+    loss_pool_3x, loss_pool_5x = [
         calc_loss_pool(
             target_mod, pred_mod, args, huber_c, is_above_limit=True, pool_num=n
         )
-        for n in [1, 3, 5]
+        for n in [3, 5]
     ]
     
     loss_ch_cosine = calc_loss_ch_cosine(target_mod, pred_mod, args, huber_c)
@@ -1140,11 +1138,11 @@ def get_loss_all(
         for s in [128, 64, 32]
     ]
     
-    loss_batch_pool_1x, loss_batch_pool_3x, loss_batch_pool_5x = [
+    loss_batch_pool_3x, loss_batch_pool_5x = [
         calc_loss_batch_relation(
             target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", pool_num=n,
         )
-        for n in [1, 3, 5]
+        for n in [3, 5]
     ]
     
     loss_batch_pixel = calc_loss_batch_relation(
@@ -1159,7 +1157,6 @@ def get_loss_all(
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
-        loss_pool_1x,
         loss_pool_3x,
         loss_pool_5x,
         loss_ch_cosine,
@@ -1168,7 +1165,6 @@ def get_loss_all(
         loss_pair_corr_128px,
         loss_pair_corr_64px,
         loss_pair_corr_32px,
-        loss_batch_pool_1x,
         loss_batch_pool_3x,
         loss_batch_pool_5x,        
         loss_batch_pixel,
