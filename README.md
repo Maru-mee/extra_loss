@@ -112,8 +112,10 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
 * learning rateは既存設定を流用可能です。
   * これまで認知できなかったgradが発生するため、もしかすると、少し下げる必要があるかもしれません。
 * optimizerのbeta値は既存設定を流用可能です。
-* debiased_estimationを使用したり,min_snr_gammaが低すぎる場合は、低周波情報を学習できないのでご注意ください（本リポジトリの狙いと干渉します。）
-* multires_noise_iterationは、おそらく共存可能です
+* 下記はおそらく共存可能ですが、本機能を活かす上でなんらかのブレーキが作用する可能性があります
+  * debiased_estimation
+  * min_snr_gamma
+  * multires_noise_iteration
    
 ## 補足
 * もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
