@@ -309,7 +309,10 @@ def calc_loss_ch_sparsity(target, noise_pred, args, huber_c):
     このlossは、必要な尖り状態があるかを評価することで、安易な平均色化へペナルティをかける
     光源などの発色を得るために効果的
     
-    使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため、target,noise_predには必ずガウシアンフィルタを予め適用しておくこと
+    メインの対象物だけでなく、サブの対象も学習しようとする力が働く。
+    
+    使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため計算結果が不安定になりがち。
+    target,noise_predにはガウシアンフィルタを予め適用しておくか、不安定にならない数式を使用すること
     """
     eps = 1e-10
 
@@ -1114,8 +1117,8 @@ def get_loss_all(
     # 適用条件： poolを使用しない関数であること（あるならば適用しても意味がない）。
     # ピクセル比較を重要視しているloss(使用したら存在意義を失う)。
     # いくら上記を満たそうとも、ピクセル比較系lossが多すぎると、過適合になる。そのため、一部のピクセル系lossは妥協して適用させるべき
-    target_gaus    = filtering_gaussian(target_mod)
-    pred_gaus      = filtering_gaussian(pred_mod)  
+    #target_gaus    = filtering_gaussian(target_mod)
+    #pred_gaus      = filtering_gaussian(pred_mod)  
     
     loss_pool_3x, loss_pool_5x = [
         calc_loss_pool(
@@ -1126,10 +1129,10 @@ def get_loss_all(
     
     loss_ch_cosine = calc_loss_ch_cosine(target_mod, pred_mod, args, huber_c)
     loss_ch_flow = calc_loss_ch_flow_2(
-        target_gaus, pred_gaus, args, huber_c, is_above_limit
+        target_mod, pred_mod, args, huber_c, is_above_limit
     )
     
-    loss_ch_sparsity = calc_loss_ch_sparsity(target_gaus, pred_gaus, args, huber_c)
+    loss_ch_sparsity = calc_loss_ch_sparsity(target_mod, pred_mod, args, huber_c)
     
     loss_pair_corr_128px, loss_pair_corr_64px, loss_pair_corr_32px = [
         calc_loss_pair_correlation(
@@ -1146,11 +1149,11 @@ def get_loss_all(
     ]
     
     loss_batch_pixel = calc_loss_batch_relation(
-        target_gaus, pred_gaus, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
+        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
     )
     
     loss_batch_sparsity = calc_loss_batch_relation(
-        target_gaus, pred_gaus, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
+        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
     )    
    
     # 統合するlossをリスト化する。
