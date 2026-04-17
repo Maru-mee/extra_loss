@@ -33,7 +33,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-<img width="6825" height="2580" alt="ON_OFF比較" src="https://github.com/user-attachments/assets/c1147a33-e044-4a08-88dd-1441b033d125" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/c1147a33-e044-4a08-88dd-1441b033d125" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
   * full_body, ポーズ, 画風が、早期に再現及び維持できています。
