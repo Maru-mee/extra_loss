@@ -223,8 +223,8 @@ def calc_loss_ch_cosine(target, noise_pred, args, huber_c):
 def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
-    loss_ch_cosineで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
+    loss_ch_cosineで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     """
 
     eps = 1e-10
@@ -234,7 +234,8 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         return torch.zeros(1, device=_device, dtype=_dtype)
 
     def create_base_grid(B, H, W):
-        """1. 基準となる座標の網を作る"""
+        # 基準となる座標の網を作る
+        
         grid_y, grid_x = torch.meshgrid(
             torch.linspace(-1, 1, H, device=_device, dtype=_dtype),
             torch.linspace(-1, 1, W, device=_device, dtype=_dtype),
@@ -243,7 +244,8 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         return torch.stack([grid_x, grid_y], dim=-1).to(_dtype).unsqueeze(0).expand(B, -1, -1, -1)
 
     def sample_by_angle(latents, base_grid, angle, r, step_h, step_w):
-        """2. 指定した角度に網をずらして値を吸い出す"""
+        # 指定した角度に網をずらして値を吸い出す
+        
         offset_x = math.cos(angle) * r * step_w
         offset_y = math.sin(angle) * r * step_h
         
@@ -259,14 +261,19 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         return sampled_latents, sampling_grid
 
     def compute_weighted_diff(orig_latents, sampled_latents, grid):
-        """3. ターゲットの差分を重みとして、有効領域のみ抽出する（画像の外を対象外とする）"""
+        # 中心点origに対する、sample点情報を計算
+        
+        #ターゲットの差分を重みとして、有効領域のみ抽出する（画像の外を対象外とする）
         mask = (grid[..., 0].abs() <= 1) & (grid[..., 1].abs() <= 1)
         valid_indices = mask.unsqueeze(1).expand_as(orig_latents)
         
-        weight = torch.abs(orig_latents - sampled_latents)
-        diff = (orig_latents - sampled_latents) * weight
+        # 中心点とサンプリング点をベクトル化
+        diff = orig_latents - sampled_latents
+        direction = torch.nn.functional.normalize(diff.float(), p=2, dim=1, eps=eps)
+        magnitude = torch.sqrt(torch.abs(diff).float() + eps)
+        vector = (direction * magnitude).to(_dtype)
         
-        return diff[valid_indices]
+        return vector[valid_indices]
 
     def get_ch_flow(target, pred):
         H, W, _, _ = get_image_hw(target)
