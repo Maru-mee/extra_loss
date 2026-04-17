@@ -302,7 +302,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
     
     return loss
 
-def calc_loss_ch_sparsity(target, noise_pred, args, huber_c):
+def calc_loss_sparsity(target, noise_pred, args, huber_c):
     """
     チャンネル間の情報の尖り具合（スパース性）を同期させる。
     一般的なloss_MSEは、茶色やグレー単色の画像を好む。なぜならば、それが最も手軽に到達できる平均解であるため。
@@ -639,7 +639,7 @@ _LOSS_CONFIG = {
     "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
     "ch_cosine": (1.0, 1.0, 0.01, [None, None]),
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
-    "ch_sparsity":  (1.0, 1.0, 0.0, [None, None]),
+    "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
     "pair_64px": (1.0, 1.0, 0.0, ["pair", "sub"]),
     "pair_32px": (1.0, 1.0, 0.0, ["pair", "sub"]),
@@ -1132,7 +1132,7 @@ def get_loss_all(
         target_mod, pred_mod, args, huber_c, is_above_limit
     )
     
-    loss_ch_sparsity = calc_loss_ch_sparsity(target_mod, pred_mod, args, huber_c)
+    loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
     
     loss_pair_corr_128px, loss_pair_corr_64px, loss_pair_corr_32px = [
         calc_loss_pair_correlation(
@@ -1164,7 +1164,7 @@ def get_loss_all(
         loss_pool_5x,
         loss_ch_cosine,
         loss_ch_flow * _current_snr_weight,
-        loss_ch_sparsity,
+        loss_sparsity,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
         loss_pair_corr_32px,
