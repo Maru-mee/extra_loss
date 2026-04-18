@@ -284,8 +284,8 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         B, C, _, _ = target.shape
         base_grid = create_base_grid(B, H, W)
         
-        # 検索半径
-        r = 2.0
+        
+        r = 2.0  # 検索半径[px] 相当距離であって、pxそのものではない
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
         
