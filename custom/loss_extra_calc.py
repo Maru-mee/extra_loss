@@ -507,15 +507,15 @@ def calc_loss_batch_relation(
             norm    = pool_num ** 2
             
         elif mode=="ch_vector":
-            # ch_vectorと同等
+            # loss_ch_vectorと類似機能
             # poolよりもピクセル単位で細かく比較できるので、キャプション差を捉えやすい（たとえば、人の顔は狭い区間にたくさんのタグがあるため）
 
             x_vector = get_vector(x_flat)
 
             features = [x_vector]
             
-            boost   = 1.0
-            norm    = area_latents               
+            boost   = 0.1
+            norm    = area_latents           
 
         elif mode=="ch_sparsity":   
 
@@ -630,6 +630,7 @@ _LOSS_CONFIG = {
     "batch_p_3x": (1.0, 1.0, 0.0, ["batch_pool", "base"]),
     "batch_p_5x": (1.0, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
+    "batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
     "batch_spars": (1.0, 1.0, 0.0, [None, None]),    
 }
 
@@ -1133,9 +1134,13 @@ def get_loss_all(
         )
         for n in [3, 5]
     ]
-    
+
     loss_batch_pixel = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
+    )
+    
+    loss_batch_ch_vector = calc_loss_batch_relation(
+        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
     )
     
     loss_batch_sparsity = calc_loss_batch_relation(
@@ -1155,9 +1160,10 @@ def get_loss_all(
         loss_pair_corr_64px,
         loss_pair_corr_32px,
         loss_batch_pool_3x,
-        loss_batch_pool_5x,        
-        loss_batch_pixel,
-        loss_batch_sparsity
+        loss_batch_pool_5x, 
+        loss_batch_pixel,       
+        loss_batch_ch_vector,
+        loss_batch_sparsity,
     ]
     
     # NaN/Inf補正およびnoise_predとのペアリング
