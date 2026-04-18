@@ -225,11 +225,13 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     return loss
 
 
-def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
+def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searching_radius=2.0):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
     loss_ch_vectorで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
+    
+    searching_radius :検索半径[px] 相当距離であって、pxそのものではない
     """
 
     eps = 1e-10
@@ -284,16 +286,14 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         B, C, _, _ = target.shape
         base_grid = create_base_grid(B, H, W)
         
-        
-        r = 2.0  # 検索半径[px] 相当距離であって、pxそのものではない
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
         
         t_list, p_list = [], []
         for angle in angles:
             # 比較対象となるピクセルの値を抽出
-            sampled_t, grid = sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
-            sampled_p, _    = sample_by_angle(pred, base_grid, angle.item(), r, step_h, step_w)
+            sampled_t, grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
+            sampled_p, _    = sample_by_angle(pred, base_grid, angle.item(), searching_radius, step_h, step_w)
             
             # 基準と比較対象との差分を計算
             t_list.append(compute_weighted_diff(target, sampled_t, grid))
@@ -626,7 +626,7 @@ _LOSS_CONFIG = {
     "pool_3x": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
     "ch_vector": (1.0, 1.0, 0.01, [None, None]),
-    "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
+    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),  
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
     "pair_64px": (1.0, 1.0, 0.0, ["pair", "sub"]),
@@ -1116,8 +1116,8 @@ def get_loss_all(
     ]
     
     loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
-    loss_ch_flow = calc_loss_ch_flow_2(
-        target_mod, pred_mod, args, huber_c, is_above_limit
+    loss_ch_flow_r2 = calc_loss_ch_flow_2(
+            target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = 2.0
     )
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
@@ -1151,7 +1151,7 @@ def get_loss_all(
         loss_pool_3x,
         loss_pool_5x,
         loss_ch_vector,
-        loss_ch_flow * _current_snr_weight,
+        loss_ch_flow_r2 * _current_snr_weight,     
         loss_sparsity,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
