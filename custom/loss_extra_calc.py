@@ -185,18 +185,18 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
         return torch.cat(features, dim=1)
     
     # 特徴抽出と標準化を一括処理
-    pool_pred   = extract_features(target, pool_num)
-    pool_target = extract_features(noise_pred, pool_num)
+    feat_pred   = extract_features(target, pool_num)
+    feat_target = extract_features(noise_pred, pool_num)
     
     boost = 0.1
     scales = boost
     
-    pool_pred.mul_(scales)
-    pool_target.mul_(scales)
+    feat_pred.mul_(scales)
+    feat_target.mul_(scales)
     
     loss = train_util.conditional_loss(
-        pool_pred.float(),
-        pool_target.float(),
+        feat_pred.float(),
+        feat_target.float(),
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -212,12 +212,12 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
     """
 
-    target_vector   = get_vector(target)
-    pred_vector     = get_vector(noise_pred)
+    feat_target   = get_vector(target)
+    feat_pred     = get_vector(noise_pred)
     
     loss = train_util.conditional_loss(
-        pred_vector.float(),
-        target_vector.float(),
+        feat_pred.float(),
+        feat_target.float(),
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -302,11 +302,11 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
             
         return torch.cat(t_list), torch.cat(p_list)
 
-    target_flows_flat, pred_flows_flat = get_ch_flow(target, noise_pred)
+    feat_target, feat_pred = get_ch_flow(target, noise_pred)
     
     loss = train_util.conditional_loss(
-        pred_flows_flat.float(), 
-        target_flows_flat.float(),
+        feat_pred.float(), 
+        feat_target.float(),
         reduction="none", 
         loss_type=args.loss_type, 
         huber_c=huber_c
@@ -335,20 +335,20 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     l2_target = torch.sqrt(torch.pow(target, 2).sum(dim=1) + eps) 
     
     # ベース設計。L2の値次第で不安定になる可能性があるので廃止
-    # sparsity_pred = l1_pred / l2_pred
-    # sparsity_target = l1_target / l2_target
+    # feat_pred = l1_pred / l2_pred
+    # feat_target = l1_target / l2_target
     
     l1_pred = torch.clamp(l1_pred, min=eps)
     l2_pred = torch.clamp(l2_pred, min=eps)
     l1_target = torch.clamp(l1_target, min=eps)
     l2_target = torch.clamp(l2_target, min=eps)    
     
-    sparsity_pred = torch.log(l1_pred) - torch.log(l2_pred)
-    sparsity_target = torch.log(l1_target) - torch.log(l2_target)
+    feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
+    feat_target = torch.log(l1_target)  - torch.log(l2_target)
 
     loss = train_util.conditional_loss(
-        sparsity_pred.float(),
-        sparsity_target.float(),
+        feat_pred.float(),
+        feat_target.float(),
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -397,17 +397,17 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         return torch.zeros(1, device=_device, dtype=_dtype)
     
     # 空間情報の抽出
-    target_small = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
-    pred_small = adaptive_avg_pool2d_for_latents(noise_pred.float(), (num_grid_h, num_grid_w))
+    feat_target = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
+    feat_pred   = adaptive_avg_pool2d_for_latents(noise_pred.float(), (num_grid_h, num_grid_w))
     
     # 特徴ベクトル化 (B, HW, C)
-    target_feat = target_small.flatten(2).transpose(1, 2)
-    pred_feat = pred_small.flatten(2).transpose(1, 2)
+    feat_target = feat_target.flatten(2).transpose(1, 2)
+    feat_pred = feat_pred.flatten(2).transpose(1, 2)
     
     # 相関行列の生成（要素ごとの差分で番地情報を維持）
     # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
-    target_corr = target_feat.unsqueeze(2) - target_feat.unsqueeze(1)
-    pred_corr = pred_feat.unsqueeze(2) - pred_feat.unsqueeze(1)
+    feat_target = feat_target.unsqueeze(2) - feat_target.unsqueeze(1)
+    feat_pred = feat_pred.unsqueeze(2) - feat_pred.unsqueeze(1)
     
     num_locations = num_grid_h * num_grid_w
 
@@ -417,22 +417,17 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     
     # チャンネル次元(dim=-1)を保持したままペアを抽出
     # (B, num_pairs, C)
-    target_pairs = target_corr[:, i, j, :]
-    pred_pairs   = pred_corr[:, i, j, :]
+    feat_target = feat_target[:, i, j, :]
+    feat_pred   = feat_pred[:, i, j, :]
         
     # 距離重みの適用
     dist_weight = apply_distance_weight(i, j, num_grid_w, _dtype, _device).unsqueeze(-1)
-    target_pairs.mul_(dist_weight)
-    pred_pairs.mul_(dist_weight)
+    feat_target.mul_(dist_weight)
+    feat_pred.mul_(dist_weight)
     
-    # 補正
-    boost = 1.0
-    target_pairs *= boost
-    pred_pairs   *= boost
-
     loss = train_util.conditional_loss(
-        pred_pairs, 
-        target_pairs,
+        feat_pred, 
+        feat_target,
         reduction="none", 
         loss_type="l2",  # ほかの関数同様にargs.loss_typeすると差分が検出できず、grad.abs.max = grad.abs.meanになってしまうので、仕方なくL2
         huber_c=huber_c
@@ -584,32 +579,32 @@ def calc_loss_batch_relation(
                 if mode=="pixel":
                     # pixelに関しては、勾配の強弱がdiffにないため、gradが定数にならないようにL2化にする
                     # diff_predが (B, B, C, H*W) なので、(C, H*W) の次元（dim=(2, 3)）を対象にノルムを計算し、(B, B) にする
-                    rel_pred    = torch.linalg.vector_norm(diff_pred, ord=2, dim=(2, 3))
-                    rel_target  = torch.linalg.vector_norm(diff_target, ord=2, dim=(2, 3))
+                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=2, dim=(2, 3))
+                    feat_target  = torch.linalg.vector_norm(diff_target, ord=2, dim=(2, 3))
                 else:
-                    rel_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
-                    rel_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
+                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
+                    feat_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
                 
                 # 補正
                 # boost : 学習効果を調整する効果
                 # norm  : 要素数などによる正規化
                 scales = boost / norm
-                rel_pred = rel_pred.mul(scales)
-                rel_target = rel_target.mul(scales)
+                feat_pred   = feat_pred.mul(scales)
+                feat_target = feat_target.mul(scales)
                 
                 # 対角成分（自己相関で０になってしまう無価値な要素）の除外
                 # ペア単位(2x2)の計算のため、sizeは常に2
                 mask = ~torch.eye(2, device=_device, dtype=torch.bool)
-                rel_pred    = rel_pred[mask]
-                rel_target  = rel_target[mask]
+                feat_pred    = feat_pred[mask]
+                feat_target  = feat_target[mask]
 
                 loss = train_util.conditional_loss(
-                    rel_pred.float(),
-                    rel_target.float(),
+                    feat_pred.float(),
+                    feat_target.float(),
                     reduction="none",
                     loss_type=args.loss_type,
                     huber_c=huber_c
-                )    
+                )
                 
                 total_loss_relation += loss.sum()
 
@@ -627,7 +622,7 @@ _LOSS_CONFIG = {
     "pool_3x": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
     "ch_vector": (1.0, 1.0, 0.01, [None, None]),
-    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),  
+    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
     "pair_64px": (1.0, 1.0, 0.0, ["pair", "sub"]),
@@ -1117,9 +1112,11 @@ def get_loss_all(
     ]
     
     loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
+    
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
             target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = 2.0
     )
+
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
     
@@ -1152,7 +1149,7 @@ def get_loss_all(
         loss_pool_3x,
         loss_pool_5x,
         loss_ch_vector,
-        loss_ch_flow_r2,     
+        loss_ch_flow_r2,
         loss_sparsity,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
