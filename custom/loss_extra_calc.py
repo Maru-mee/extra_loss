@@ -149,6 +149,15 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     
     return mean + std
 
+def get_vector(x):
+    # latents情報をベクトル表現に直して、勾配予測をアシストする
+    
+    eps = 1e-10
+    direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
+    magnitude = torch.sqrt(torch.abs(x).float() + eps)
+    vector = (direction * magnitude).to(_dtype)
+    return vector
+
 # ==============================================================================================
 
 def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
@@ -194,37 +203,33 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     
     return loss
     
-def calc_loss_ch_cosine(target, noise_pred, args, huber_c):
+def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     """
-    ピクセル単位のチャネル間ベクトル方向の一致度を算出。
+    ピクセル単位のチャネル間ベクトルの一致度を算出。
+    色相や概念の向きを評価
     pixel perfectやドット検出（多少ではあるがエッジ検出）の効果があり、新しい画像要素を発見するのに特に有効。
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
     """
-    eps = 1e-10
+
+    target_vector   = get_vector(target)
+    pred_vector     = get_vector(noise_pred)
     
-    # チャンネル方向(dim=1)で正規化
-    target_norm = torch.nn.functional.normalize(target.float(), p=2, dim=1, eps=eps)
-    pred_norm = torch.nn.functional.normalize(noise_pred.float(), p=2, dim=1, eps=eps)
-    
-    # 損失計算
     loss = train_util.conditional_loss(
-        pred_norm.float(),
-        target_norm.float(),
+        pred_vector.float(),
+        target_vector.float(),
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
     )
             
     return loss
-    
-#def calc_loss_ch_flow_1(target, noise_pred, args, huber_c, is_above_limit):
-    # 削除 2026/3/9
+
 
 def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
-    loss_ch_cosineで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
+    loss_ch_vectorで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     """
 
     eps = 1e-10
@@ -269,9 +274,8 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit):
         
         # 中心点とサンプリング点をベクトル化
         diff = orig_latents - sampled_latents
-        direction = torch.nn.functional.normalize(diff.float(), p=2, dim=1, eps=eps)
-        magnitude = torch.sqrt(torch.abs(diff).float() + eps)
-        vector = (direction * magnitude).to(_dtype)
+        
+        vector = get_vector(diff)
         
         return vector[valid_indices]
 
@@ -341,7 +345,6 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     sparsity_pred = torch.log(l1_pred) - torch.log(l2_pred)
     sparsity_target = torch.log(l1_target) - torch.log(l2_target)
 
-    # 既存の共通関数を用いて損失を算出
     loss = train_util.conditional_loss(
         sparsity_pred.float(),
         sparsity_target.float(),
@@ -464,7 +467,7 @@ def calc_loss_batch_relation(
         if mode == "pool" and pool_num == 1:
             # この条件ならば、平均色をbatch比較する意義があるので、skipしたくない
             pass
-        elif mode=="ch_cosine" or mode=="pixel" or mode=="ch_sparsity":
+        elif mode=="ch_vector" or mode=="pixel" or mode=="ch_sparsity":
             # これらのモードであればピクセル同士の比較であるため、解像度に関係なく使用可能
             pass          
         else:
@@ -489,23 +492,6 @@ def calc_loss_batch_relation(
             
             boost   = 1.0
             norm    = area_latents
-                       
-        elif mode=="tones":
-            # 輝度の階層別比較。
-            # 位置づけは、stdの上位互換
-            # 平均色はtonesでは考慮せず、平均色からの差分だけを評価する。
-            # 補足：平均色はpoolが担当して、重複カウントを抑制。この重複を抑制しないと、明確に色がおかしくなり、めちゃくちゃになる
-            # tones の目的は、分布の「広がり（コントラスト/彩度）」を合わせることであり、明るさの絶対位置を合わせなくても破綻しない
-            
-            x_delta = x_flat - x_flat.mean(dim=2, keepdim=True) # 平均を除去
-            sampling_reso = 10
-            
-            q_list = torch.linspace(0.0, 1.0, sampling_reso, device=_device, dtype=torch.float32)
-            tones = torch.quantile(x_delta.float(), q_list, dim=2).permute(1, 2, 0).flatten(1) 
-            features.append(tones)
-
-            boost = 1.0  #経験則からこのくらい。
-            #print(f"num_features(tones)\t{num_features}")
             
         elif mode=="pool":
             # 各領域のベクトルの平均値を比較する
@@ -524,21 +510,16 @@ def calc_loss_batch_relation(
             boost   = 0.01 # 基本的にpoolによるbatch比較は、評価する領域が粗いせいか、gradがやたら大きくなりやすく、等倍だと支配的になりすぎる
             norm    = pool_num ** 2
             
-        elif mode=="ch_cosine":
-            # ch_cosineと同等
+        elif mode=="ch_vector":
+            # ch_vectorと同等
             # poolよりもピクセル単位で細かく比較できるので、キャプション差を捉えやすい（たとえば、人の顔は狭い区間にたくさんのタグがあるため）
-            
-            # そのため、平均輝度のみを扱うbatch_tonesの役割を数学的に内包し、上位互換として機能する。
-            # 理由は、ch_cosineはチャンネル間の比率を固定するため、比率が確定すれば輝度（合計値）の自由度も制限される。
-            # timestepがノイズだらけのときでも使用できるのがアドバンテージ
-                            
-            # 空間方向（dim=2）に対して正規化を行う
-            x_norm = torch.nn.functional.normalize(x_flat.float(), p=2, dim=1, eps=1e-16)
 
-            features = [x_norm]
+            x_vector = get_vector(x_flat)
+
+            features = [x_vector]
             
             boost   = 1.0
-            norm    = area_latents            
+            norm    = area_latents               
 
         elif mode=="ch_sparsity":   
 
@@ -564,7 +545,7 @@ def calc_loss_batch_relation(
             #mean = torch.mean(x, dim=(2, 3))  # 全体的な色味や明るさのトーン → 画像が茶色くなる原因かもしれない、ボツ
             #amax = top_k_mean(largest=True)   # 最も強い光（ハイライト）の勢い → timestep1000付近で4隅欠損するのでボツ
             #amin = top_k_mean(largest=False)  # 最も深い影（ヌケ）の沈み込み → timestep1000付近で4隅欠損するのでボツ
-            #std  = torch.std(x, dim=(2, 3))   # 描き込みの密度や質感の激しさ → tonesが上位互換となるのでボツ
+            #std  = torch.std(x, dim=(2, 3))   # 描き込みの密度や質感の激しさ
             features.extend([
                 #mean,
                 #amax, 
@@ -644,7 +625,7 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "pool_3x": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    "ch_cosine": (1.0, 1.0, 0.01, [None, None]),
+    "ch_vector": (1.0, 1.0, 0.01, [None, None]),
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
@@ -1134,7 +1115,7 @@ def get_loss_all(
         for n in [3, 5]
     ]
     
-    loss_ch_cosine = calc_loss_ch_cosine(target_mod, pred_mod, args, huber_c)
+    loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     loss_ch_flow = calc_loss_ch_flow_2(
         target_mod, pred_mod, args, huber_c, is_above_limit
     )
@@ -1169,7 +1150,7 @@ def get_loss_all(
         loss_base,
         loss_pool_3x,
         loss_pool_5x,
-        loss_ch_cosine,
+        loss_ch_vector,
         loss_ch_flow * _current_snr_weight,
         loss_sparsity,
         loss_pair_corr_128px,
