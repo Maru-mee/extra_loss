@@ -151,6 +151,7 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
 
 def get_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
+    # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
     
     eps = 1e-10
     direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
@@ -1151,7 +1152,7 @@ def get_loss_all(
         loss_pool_3x,
         loss_pool_5x,
         loss_ch_vector,
-        loss_ch_flow_r2 * _current_snr_weight,     
+        loss_ch_flow_r2,     
         loss_sparsity,
         loss_pair_corr_128px,
         loss_pair_corr_64px,
