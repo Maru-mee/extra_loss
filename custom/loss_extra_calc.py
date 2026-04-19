@@ -149,13 +149,22 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     
     return mean + std
 
-def get_vector(x):
+def get_ch_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
     # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
 
     eps = 1e-10    
     direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
     magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
+    vector = (direction * magnitude).to(_dtype)
+    return vector
+    
+def get_batch_vector(x):
+    # バッチ方向のベクトル化
+
+    eps = 1e-10     
+    direction = torch.nn.functional.normalize(x.float(), p=2, dim=0, eps=eps)
+    magnitude = torch.abs(x)
     vector = (direction * magnitude).to(_dtype)
     return vector
 
@@ -212,8 +221,8 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
     """
 
-    feat_target   = get_vector(target)
-    feat_pred     = get_vector(noise_pred)
+    feat_target   = get_ch_vector(target)
+    feat_pred     = get_ch_vector(noise_pred)
     
     loss = train_util.conditional_loss(
         feat_pred.float(),
@@ -272,7 +281,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         # 中心点とサンプリング点をベクトル化
         diff = orig_latents - sampled_latents
         
-        vector = get_vector(diff)
+        vector = get_ch_vector(diff)
         
         return vector[valid_indices]
 
@@ -513,11 +522,11 @@ def calc_loss_batch_relation(
             # loss_ch_vectorと類似機能
             # poolよりもピクセル単位で細かく比較できるので、キャプション差を捉えやすい（たとえば、人の顔は狭い区間にたくさんのタグがあるため）
 
-            x_vector = get_vector(x_flat)
+            x_vector = get_ch_vector(x_flat)
 
             features = [x_vector]
             
-            boost   = 0.1
+            boost   = 1.0
             norm    = area_latents           
 
         elif mode=="ch_sparsity":   
@@ -536,7 +545,7 @@ def calc_loss_batch_relation(
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 0.01
+            boost   = 1.0
             norm    = area_latents
             
         elif mode=="others": 
@@ -569,37 +578,19 @@ def calc_loss_batch_relation(
                 # 特徴抽出と標準化を一括処理
                 feat_pred, boost, norm  = extract_features(noise_pred[indices], mode)
                 feat_target, _, norm    = extract_features(target[indices], mode)
-                
-                # p=1(L1距離)を採用し、特徴量の差分を定義
-                # 類似度（内積方式）はL2特性を持つため、値が過小になり外れ値ばかりが優先される傾向がある。
-                # それを避けるため、L1ノルム（vector_norm ord=1）にて各要素の差を忠実に拾う。
-                # また、meanではなくsum（または相当する集計）を使用することで、
-                # 正負の誤差による相殺・対消滅を防ぎ、バッチ内の関係性を確実に勾配へ乗せる。
-                diff_pred   = feat_pred.unsqueeze(1)   - feat_pred.unsqueeze(0)
-                diff_target = feat_target.unsqueeze(1) - feat_target.unsqueeze(0)
 
-                # L1ベクトルノルムとして集計し、勾配爆発を抑制
-                if mode=="pixel":
-                    # pixelに関しては、勾配の強弱がdiffにないため、gradが定数にならないようにL2化にする
-                    # diff_predが (B, B, C, H*W) なので、(C, H*W) の次元（dim=(2, 3)）を対象にノルムを計算し、(B, B) にする
-                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=2, dim=(2, 3))
-                    feat_target  = torch.linalg.vector_norm(diff_target, ord=2, dim=(2, 3))
-                else:
-                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
-                    feat_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
-                
+                # batch方向のベクトル化
+                # 【参考】 以前は、２つのbatchのペアのL1距離で計算していたが、
+                # 差が小さいときのアンダーフローや勾配爆発に悩まされたので、差をベクトルとして扱うことにした。ベクトル化するほうがシンプルかつ軽量
+                feat_pred      = get_batch_vector(feat_pred)
+                feat_target    = get_batch_vector(feat_target)
+                                
                 # 補正
                 # boost : 学習効果を調整する効果
                 # norm  : 要素数などによる正規化
                 scales = boost / norm
                 feat_pred   = feat_pred.mul(scales)
                 feat_target = feat_target.mul(scales)
-                
-                # 対角成分（自己相関で０になってしまう無価値な要素）の除外
-                # ペア単位(2x2)の計算のため、sizeは常に2
-                mask = ~torch.eye(2, device=_device, dtype=torch.bool)
-                feat_pred    = feat_pred[mask]
-                feat_target  = feat_target[mask]
 
                 loss = train_util.conditional_loss(
                     feat_pred.float(),
