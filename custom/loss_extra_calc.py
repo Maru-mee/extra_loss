@@ -152,10 +152,10 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
 def get_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
     # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
-    
-    eps = 1e-10
+
+    eps = 1e-10    
     direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
-    magnitude = torch.sqrt(torch.abs(x).float() + eps)
+    magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
     vector = (direction * magnitude).to(_dtype)
     return vector
 
@@ -1117,7 +1117,6 @@ def get_loss_all(
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
             target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = 2.0
     )
-
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
     
