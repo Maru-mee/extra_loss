@@ -252,27 +252,21 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         return torch.stack([grid_x, grid_y], dim=-1).to(_dtype).unsqueeze(0).expand(B, -1, -1, -1)
 
     def sample_by_angle(latents, base_grid, angle, r, step_h, step_w):
-        # 指定した角度に網をずらして値を吸い出す
+        # 指定した角度に網をずらして、座標を吸い出す
         
         offset_x = math.cos(angle) * r * step_w
         offset_y = math.sin(angle) * r * step_h
         
-        sampling_grid = base_grid.to(latents.dtype).clone()
+        sampling_grid = base_grid.to(_dtype).clone()
         sampling_grid[..., 0] += offset_x
         sampling_grid[..., 1] += offset_y
         
-        sampled_latents = torch.nn.functional.grid_sample(
-            latents, sampling_grid, mode='bilinear', padding_mode='border', align_corners=True
-        )
-        # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
-        
-        return sampled_latents, sampling_grid
+        return sampling_grid
 
-    def calc_vector_diff(orig_latents, sampled_latents, grid):
+    def calc_vector_diff(orig_latents, sampled_latents, mask):
         # 中心点origに対する、sample点情報を計算
         
-        #ターゲットの差分を重みとして、有効領域のみ抽出する（画像の外を対象外とする）
-        mask = (grid[..., 0].abs() <= 1) & (grid[..., 1].abs() <= 1)
+        #ターゲットの差分を重みとする。
         valid_indices = mask.unsqueeze(1).expand_as(orig_latents)
         
         # 中心点とサンプリング点をベクトル化
@@ -292,13 +286,22 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         target_list, pred_list = [], []
         for angle in angles:
-            # 比較対象となるピクセルの値を抽出
-            sampled_target  , grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
-            sampled_pred    , _    = sample_by_angle(pred, base_grid, angle.item(), searching_radius, step_h, step_w)
+
+            sampling_grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
+            mask = (sampling_grid[..., 0].abs() <= 1) & (sampling_grid[..., 1].abs() <= 1) # 有効領域のみ抽出する（画像の外を対象外とする）
+            
+            # grid付近のピクセルから、値を補間しつつ取得する
+            # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+            sampled_target = torch.nn.functional.grid_sample(
+                target.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
+            )
+            sampled_pred = torch.nn.functional.grid_sample(
+                pred.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
+            )
             
             # 基準と比較対象との差分を計算
-            target_list.append(calc_vector_diff(target, sampled_target, grid))
-            pred_list.append(calc_vector_diff(pred, sampled_pred, grid))
+            target_list.append(calc_vector_diff(target, sampled_target, mask))
+            pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
             
         return torch.cat(target_list), torch.cat(pred_list)
 
