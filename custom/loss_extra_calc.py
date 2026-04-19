@@ -268,7 +268,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         return sampled_latents, sampling_grid
 
-    def compute_weighted_diff(orig_latents, sampled_latents, grid):
+    def calc_vector_diff(orig_latents, sampled_latents, grid):
         # 中心点origに対する、sample点情報を計算
         
         #ターゲットの差分を重みとして、有効領域のみ抽出する（画像の外を対象外とする）
@@ -290,17 +290,17 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
         
-        t_list, p_list = [], []
+        target_list, pred_list = [], []
         for angle in angles:
             # 比較対象となるピクセルの値を抽出
-            sampled_t, grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
-            sampled_p, _    = sample_by_angle(pred, base_grid, angle.item(), searching_radius, step_h, step_w)
+            sampled_target  , grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
+            sampled_pred    , _    = sample_by_angle(pred, base_grid, angle.item(), searching_radius, step_h, step_w)
             
             # 基準と比較対象との差分を計算
-            t_list.append(compute_weighted_diff(target, sampled_t, grid))
-            p_list.append(compute_weighted_diff(pred, sampled_p, grid))
+            target_list.append(calc_vector_diff(target, sampled_target, grid))
+            pred_list.append(calc_vector_diff(pred, sampled_pred, grid))
             
-        return torch.cat(t_list), torch.cat(p_list)
+        return torch.cat(target_list), torch.cat(pred_list)
 
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
     
