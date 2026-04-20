@@ -167,7 +167,17 @@ def get_batch_vector(x):
     magnitude = torch.abs(x)
     vector = (direction * magnitude).to(_dtype)
     return vector
-
+    
+def get_pair_vector(x):
+    # loss_pair専用のベクトル化
+    # x: (B, N_pairs, C)
+    
+    eps = 1e-10
+    direction = torch.nn.functional.normalize(x.float(), p=2, dim=2, eps=eps)
+    magnitude = torch.abs(x)
+    vector = (direction * magnitude).to(_dtype)
+    return vector
+    
 # ==============================================================================================
 
 def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
@@ -241,7 +251,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
     loss_ch_vectorで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     
-    searching_radius :検索半径[px] 相当距離であって、pxそのものではない
+    searching_radius :検索半径[px] 相当距離であって、pxそのものではない。単一の値か、リスト（複数の半径）かを指定
     """
 
     eps = 1e-10
@@ -249,6 +259,9 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
     if not is_above_limit:
         # 解像度が低い場合、計算困難な境界影響が強くなり、境界クロップが発生しやすくなる
         return torch.zeros(1, device=_device, dtype=_dtype)
+        
+    if not isinstance(searching_radius, list):
+        searching_radius = [searching_radius]  
 
     def create_base_grid(B, H, W):
         # 基準となる座標の網を作る
@@ -294,23 +307,25 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
         
         target_list, pred_list = [], []
-        for angle in angles:
+        
+        for r in searching_radius:
+            for angle in angles:
 
-            sampling_grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
-            mask = (sampling_grid[..., 0].abs() <= 1) & (sampling_grid[..., 1].abs() <= 1) # 有効領域のみ抽出する（画像の外を対象外とする）
-            
-            # grid付近のピクセルから、値を補間しつつ取得する
-            # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
-            sampled_target = torch.nn.functional.grid_sample(
-                target.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-            )
-            sampled_pred = torch.nn.functional.grid_sample(
-                pred.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-            )
-            
-            # 基準と比較対象との差分を計算
-            target_list.append(calc_vector_diff(target, sampled_target, mask))
-            pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
+                sampling_grid = sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
+                mask = (sampling_grid[..., 0].abs() <= 1) & (sampling_grid[..., 1].abs() <= 1) # 有効領域のみ抽出する（画像の外を対象外とする）
+                
+                # grid付近のピクセルから、値を補間しつつ取得する
+                # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+                sampled_target = torch.nn.functional.grid_sample(
+                    target.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
+                )
+                sampled_pred = torch.nn.functional.grid_sample(
+                    pred.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
+                )
+                
+                # 基準と比較対象との差分を計算
+                target_list.append(calc_vector_diff(target, sampled_target, mask))
+                pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
             
         return torch.cat(target_list), torch.cat(pred_list)
 
@@ -378,26 +393,6 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     poolの分割数
     """
     
-    def apply_distance_weight(i, j, num_grid_w, dtype, device):
-        """
-        グリッド上の距離に応じて重みを生成
-        1マス隣: 1.5倍 / その他: 1.0倍に近い値へ減衰
-        """
-        # インデックスから2次元座標(x, y)を復元
-        dx = (i % num_grid_w - j % num_grid_w).abs().to(dtype)
-        dy = (i // num_grid_w - j // num_grid_w).abs().to(dtype)
-        
-        # 直線距離(ユークリッド距離)に基づいて算出
-        dist = torch.sqrt(dx**2 + dy**2)
-
-        # 1.0(ベース) + 強度 * 指数減衰
-        # dist=1.0 のとき 1.5 になるよう設定
-        strength = 0.5
-        decay = 0.8 
-        weights = 1.0 + strength * torch.exp(-decay * (dist - 1.0))
-        
-        return weights
-
     # サイズから分割数決定
     H, W, _, _ = get_image_hw(target)
     scale_latents = scale_px / 8 # px → latents
@@ -407,6 +402,29 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
     if num_grid_h < 4 or num_grid_w < 4:
         return torch.zeros(1, device=_device, dtype=_dtype)
+        
+    # ペア番地の作成 -------------------------------------------    
+    # ペア間の距離制限を設けることだけが目的。距離制限を考慮しないのならば、不要な行程
+
+    dist_max = 5 # 単位: grid。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(num_grid_h, device=_device), 
+        torch.arange(num_grid_w, device=_device), 
+        indexing='ij'
+    )
+    coords = torch.stack(
+        [grid_y.flatten(), grid_x.flatten()], 
+        dim=1
+    )
+
+    num_locations = num_grid_h * num_grid_w
+    indices = torch.triu_indices(num_locations, num_locations, offset=1, device=_device)
+    i, j = indices[0], indices[1]
+    dist = (coords[i] - coords[j]).abs().sum(-1)
+    i, j = i[dist <= dist_max], j[dist <= dist_max]
+        
+    # -------------------------------------------------------]
     
     # 空間情報の抽出
     feat_target = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
@@ -418,30 +436,19 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     
     # 相関行列の生成（要素ごとの差分で番地情報を維持）
     # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
-    feat_target = feat_target.unsqueeze(2) - feat_target.unsqueeze(1)
-    feat_pred = feat_pred.unsqueeze(2) - feat_pred.unsqueeze(1)
+    feat_target = feat_target[:, i, :] - feat_target[:, j, :]
+    feat_pred = feat_pred[:, i, :] - feat_pred[:, j, :]
     
-    num_locations = num_grid_h * num_grid_w
-
-    # 重複と自己相関を排除するインデックスを抽出
-    indices = torch.triu_indices(num_locations, num_locations, offset=1, device=_device)
-    i, j = indices[0], indices[1]  # (i:基準点, j:比較点) 
-    
-    # チャンネル次元(dim=-1)を保持したままペアを抽出
-    # (B, num_pairs, C)
-    feat_target = feat_target[:, i, j, :]
-    feat_pred   = feat_pred[:, i, j, :]
-        
-    # 距離重みの適用
-    dist_weight = apply_distance_weight(i, j, num_grid_w, _dtype, _device).unsqueeze(-1)
-    feat_target.mul_(dist_weight)
-    feat_pred.mul_(dist_weight)
+    # ベクトル化
+    # これによって、loss_type=l1時の、grad_absのmaxとmeanが等しくなってしまう問題を解消
+    feat_target = get_pair_vector(feat_target)
+    feat_pred   = get_pair_vector(feat_pred)
     
     loss = train_util.conditional_loss(
         feat_pred, 
         feat_target,
         reduction="none", 
-        loss_type="l2",  # ほかの関数同様にargs.loss_typeすると差分が検出できず、grad.abs.max = grad.abs.meanになってしまうので、仕方なくL2
+        loss_type=args.loss_type,
         huber_c=huber_c
     )
             
