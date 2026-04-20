@@ -305,27 +305,36 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
-        
-        target_list, pred_list = [], []
-        
+                
+        sample_points = []
         for r in searching_radius:
             for angle in angles:
+                sample_points.append(
+                    sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
+                )
+        
+        num_samples = len(sample_points)      
 
-                sampling_grid = sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
-                mask = (sampling_grid[..., 0].abs() <= 1) & (sampling_grid[..., 1].abs() <= 1) # 有効領域のみ抽出する（画像の外を対象外とする）
+        # sample_pointから、値を補間しつつ取得する
+        sampled_all = torch.nn.functional.grid_sample(
+            torch.cat([target, pred], dim=1).repeat(num_samples, 1, 1, 1).float(), # 統合してgrid_sample呼び出し回数を削減
+            torch.cat(sample_points, dim=0).float(),
+            mode='bilinear', 
+            padding_mode='border', 
+            align_corners=True
+        )
+        # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+
+        sampled_all = sampled_all.view(num_samples, B, C * 2, H, W)
+
+        target_list, pred_list = [], []
+        for i in range(num_samples):
+            mask = (sample_points[i][..., 0].abs() <= 1) & (sample_points[i][..., 1].abs() <= 1)  # 有効領域のみ抽出する（画像の外を対象外とする）
                 
-                # grid付近のピクセルから、値を補間しつつ取得する
-                # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
-                sampled_target = torch.nn.functional.grid_sample(
-                    target.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-                )
-                sampled_pred = torch.nn.functional.grid_sample(
-                    pred.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-                )
-                
-                # 基準と比較対象との差分を計算
-                target_list.append(calc_vector_diff(target, sampled_target, mask))
-                pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
+            # 基準と比較対象との差分を計算
+            sampled_target, sampled_pred = torch.chunk(sampled_all[i], 2, dim=1)
+            target_list.append(calc_vector_diff(target, sampled_target, mask))
+            pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
             
         return torch.cat(target_list), torch.cat(pred_list)
 
@@ -1116,7 +1125,7 @@ def get_loss_all(
     loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
-            target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = 2.0
+        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0]
     )
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
