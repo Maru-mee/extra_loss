@@ -110,7 +110,7 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
     
   </details>
 * learning rateは既存設定を流用可能です。
-  * これまで認知できなかったgradが発生するため、もしかすると、少し下げる必要があるかもしれません。
+  * これまで認知できなかったgradが発生するため、少しだけ調整が必要かもしれません。
 * optimizerのbeta値は既存設定を流用可能です。
 * 下記はおそらく共存可能ですが、本機能を活かす上でなんらかのブレーキが作用する可能性があります
   * debiased_estimation
