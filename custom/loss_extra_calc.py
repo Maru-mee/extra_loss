@@ -406,17 +406,30 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     l2_pred = torch.sqrt(torch.pow(noise_pred, 2).sum(dim=1) + eps)
     l2_target = torch.sqrt(torch.pow(target, 2).sum(dim=1) + eps) 
     
-    # ベース設計。L2の値次第で不安定になる可能性があるので廃止
+    # ベース設計。
+    # L2の値次第で不安定になる可能性があるので廃止
     # feat_pred = l1_pred / l2_pred
     # feat_target = l1_target / l2_target
     
+    # 対数差分方式。ベース設計に対する不安定性を解消した手段
     l1_pred = torch.clamp(l1_pred, min=eps)
     l2_pred = torch.clamp(l2_pred, min=eps)
     l1_target = torch.clamp(l1_target, min=eps)
     l2_target = torch.clamp(l2_target, min=eps)    
     
-    feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
-    feat_target = torch.log(l1_target)  - torch.log(l2_target)
+    # 対数差分のベース設計（下記のベース設計）
+    # feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
+    # feat_target = torch.log(l1_target)  - torch.log(l2_target)
+    
+    # 対数差分方式をベクトル化。
+    # 絶対値と向きを評価でき、一部のgradだけが突出して大きくなる状態を防げる。
+    
+    # l1とl2をペアリング (B, N_pairs = HW, C=2) 
+    feat_pred   = torch.stack([l1_pred.flatten(1), l2_pred.flatten(1)], dim=2)
+    feat_target = torch.stack([l1_target.flatten(1), l2_target.flatten(1)], dim=2)
+    
+    feat_pred   = get_pair_vector(feat_pred)
+    feat_target = get_pair_vector(feat_target)    
 
     loss = apply_conditional_loss(
         feat_pred,
@@ -581,7 +594,8 @@ def calc_loss_batch_relation(
             boost   = 1.0
             norm    = area_latents           
 
-        elif mode=="ch_sparsity":   
+        elif mode=="ch_sparsity":
+            # 設計思想はloss_ch_sparsityと同等
 
             eps=1e-16
             
@@ -591,7 +605,9 @@ def calc_loss_batch_relation(
             x_l1 = torch.clamp(x_l1, min=eps)
             x_l2 = torch.clamp(x_l2, min=eps)
             
-            x_sparsity = torch.log(x_l1) - torch.log(x_l2)
+            x_sparsity  = get_pair_vector(
+                torch.stack([x_l1.flatten(1), x_l2.flatten(1)], dim=2)
+            )
             
             features = [
                 x_sparsity.flatten(1),
