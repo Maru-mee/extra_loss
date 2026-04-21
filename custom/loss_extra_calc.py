@@ -394,6 +394,11 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     光源などの発色を得るために効果的
     
     メインの対象物だけでなく、サブの対象も学習しようとする力が働く。
+    他のloss由来のgradに対する直交性が強い
+    結果、構図がリセットされやすいので、過度な依存は厳禁
+    
+    L1/L2のtarget-pred間で一致をするということは、
+    huber smooth_l1 snrを強制するということ。遊びは減るかも知れないが、縛りは強くなりすぎるかもしれない
     
     使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため計算結果が不安定になりがち。
     target,noise_predにはガウシアンフィルタを予め適用しておくか、不安定にならない数式を使用すること
@@ -429,7 +434,11 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_target = torch.stack([l1_target.flatten(1), l2_target.flatten(1)], dim=2)
     
     feat_pred   = get_pair_vector(feat_pred)
-    feat_target = get_pair_vector(feat_target)    
+    feat_target = get_pair_vector(feat_target)  
+
+    scales = 0.5  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    feat_pred.mul_(scales)
+    feat_target.mul_(scales)
 
     loss = apply_conditional_loss(
         feat_pred,
