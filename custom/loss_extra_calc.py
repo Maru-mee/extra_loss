@@ -147,14 +147,16 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     mean, mean_sq = torch.chunk(pooled, 2, dim=1)
     std = torch.sqrt(mean_sq - mean.pow(2) + eps)
     
-    return mean + std
+    return torch.complex(mean.float(), std.float()) # 複素数化によって、チャンネル数を増やすことなく、それぞれ独立した評価を可能にする
 
 def get_ch_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
     # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
 
-    eps = 1e-10    
-    direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
+    eps = 1e-10
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=1, eps=eps)
     magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
     vector = (direction * magnitude).to(_dtype)
     return vector
@@ -163,7 +165,9 @@ def get_batch_vector(x):
     # バッチ方向のベクトル化
 
     eps = 1e-10     
-    direction = torch.nn.functional.normalize(x.float(), p=2, dim=0, eps=eps)
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=0, eps=eps)
     magnitude = torch.abs(x)
     vector = (direction * magnitude).to(_dtype)
     return vector
@@ -173,10 +177,42 @@ def get_pair_vector(x):
     # x: (B, N_pairs, C)
     
     eps = 1e-10
-    direction = torch.nn.functional.normalize(x.float(), p=2, dim=2, eps=eps)
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=2, eps=eps)
     magnitude = torch.abs(x)
     vector = (direction * magnitude).to(_dtype)
     return vector
+    
+def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c):
+    
+    if torch.is_complex(feat_pred):
+        loss_real = train_util.conditional_loss(
+            feat_pred.real.float(), 
+            feat_target.real.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        loss_imag = train_util.conditional_loss(
+            feat_pred.imag.float(), 
+            feat_target.imag.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        loss = loss_real + loss_imag
+    
+    else:
+        loss = train_util.conditional_loss(
+            feat_pred.float(), 
+            feat_target.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        
+    return loss
     
 # ==============================================================================================
 
@@ -213,9 +249,9 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     feat_pred.mul_(scales)
     feat_target.mul_(scales)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -234,9 +270,9 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     feat_target   = get_ch_vector(target)
     feat_pred     = get_ch_vector(noise_pred)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -340,9 +376,9 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
 
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(), 
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none", 
         loss_type=args.loss_type, 
         huber_c=huber_c
@@ -382,9 +418,9 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
     feat_target = torch.log(l1_target)  - torch.log(l2_target)
 
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -453,13 +489,13 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = get_pair_vector(feat_target)
     feat_pred   = get_pair_vector(feat_pred)
     
-    loss = train_util.conditional_loss(
-        feat_pred, 
+    loss = apply_conditional_loss(
+        feat_pred,
         feat_target,
         reduction="none", 
         loss_type=args.loss_type,
         huber_c=huber_c
-    )
+    )  
             
     return loss
     
@@ -608,9 +644,9 @@ def calc_loss_batch_relation(
                 feat_pred   = feat_pred.mul(scales)
                 feat_target = feat_target.mul(scales)
 
-                loss = train_util.conditional_loss(
-                    feat_pred.float(),
-                    feat_target.float(),
+                loss = apply_conditional_loss(
+                    feat_pred,
+                    feat_target,
                     reduction="none",
                     loss_type=args.loss_type,
                     huber_c=huber_c
@@ -715,6 +751,8 @@ def combine_losses_dynamically(
                     効果：低解像度画像に対する過適合を防ぐ。パレート解の高解像度寄りに寄せる。低解像度画像はハズレ値の学習に専念させる。
                 ・なぜgradではなくlossに適用したのか。→ 低解像度における高いgradは許容できないノイズである可能性がある。lossという目線でフィルタリングすべき
                 ・loss_base :これを超えるかどうかで減衰しやすさが変わる。
+                
+                ToDo: snrによってlossの値が変わるのが普通なので、snr（あるいはloss_EMA=f(snr)の概念）も引数として必要。とはいえ、高解像度であればカットオフリスクはないので、このままでも高解像度中心としたパレート解算出という目的は果たせているはず。
                 """
                 
                 ideal_reso = 1024 # 理想的な解像度。この解像度以上であれば減衰ほぼなし                  
