@@ -202,7 +202,6 @@ def compare_pair(x):
     v_sum  = (v1 + v2) * 0.5
     
     def get_pair_vector(x):
-        # バッチ方向のベクトル化
         eps = 1e-10     
         x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
         
@@ -534,10 +533,9 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = feat_target.flatten(2).transpose(1, 2)
     feat_pred = feat_pred.flatten(2).transpose(1, 2)
     
-    # 相関行列の生成（要素ごとの差分で番地情報を維持）
-    # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
-    feat_target = feat_target[:, i, :] - feat_target[:, j, :]
-    feat_pred = feat_pred[:, i, :] - feat_pred[:, j, :]
+    # (B, HW, 1, C) と (B, 1, HW, C)
+    feat_target = torch.cat([feat_target[:, i, :], feat_target[:, j, :]], dim=2)
+    feat_pred   = torch.cat([feat_pred[:, i, :], feat_pred[:, j, :]], dim=2)
     
     # ベクトル化
     # これによって、loss_type=l1時の、grad_absのmaxとmeanが等しくなってしまう問題を解消
@@ -732,9 +730,7 @@ _LOSS_CONFIG = {
     "ch_vector": (0.5, 1.0, 0.01, [None, None]),
     "ch_flow_r2":  (0.5, 1.0, 0.0, [None, None]),
     "sparsity":  (0.5, 1.0, 0.0, [None, None]),
-    "pair_128px": (0.5, 1.0, 0.0, ["pair", "base"]),
-    "pair_64px": (0.5, 1.0, 0.0, ["pair", "sub"]),
-    "pair_32px": (0.5, 1.0, 0.0, ["pair", "sub"]),
+    "pair_32px": (0.5, 1.0, 0.0, [None, None]),
     "batch_p_3x": (1.0, 1.0, 0.0, ["batch_pool", "base"]),
     "batch_p_5x": (1.0, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
@@ -1245,12 +1241,9 @@ def get_loss_all(
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
     
-    loss_pair_corr_128px, loss_pair_corr_64px, loss_pair_corr_32px = [
-        calc_loss_pair_correlation(
-            target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=s
-        )
-        for s in [128, 64, 32]
-    ]
+    loss_pair_corr_32px = calc_loss_pair_correlation(
+        target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=32
+    )
     
     loss_batch_pool_3x, loss_batch_pool_5x = [
         calc_loss_batch_relation(
@@ -1280,12 +1273,12 @@ def get_loss_all(
         loss_ch_vector,
         loss_ch_flow_r2,
         loss_sparsity,
-        loss_pair_corr_128px,
-        loss_pair_corr_64px,
+        # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
+        # loss_pair_corr_64px,  # 廃止。同上
         loss_pair_corr_32px,
         loss_batch_pool_3x,
         loss_batch_pool_5x, 
-        loss_batch_pixel,       
+        loss_batch_pixel,
         loss_batch_ch_vector,
         loss_batch_sparsity,
     ]
