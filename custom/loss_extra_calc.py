@@ -723,14 +723,13 @@ def combine_losses_dynamically(
     # first_valid_loss : 基本情報取得や初期化のために、Noneではないlossを見つける
     first_valid_loss = next(l for l in losses_list if l is not None)
     first_valid_loss_tensor = first_valid_loss[0] if isinstance(first_valid_loss, tuple) else first_valid_loss
-    all_loss = torch.zeros_like(first_valid_loss_tensor)
     
     device = first_valid_loss_tensor.device
         
     grads_list = [] # 各lossから算出したgrad
     valid_grad_indices = []  # losses_listのインデックスのうち、grads_listに入ったもの
     base_shape_tensor = None # 基準となる形状（通常は最初の有効なロス）を特定するための準備
-    scalar_only_sum = torch.tensor(0.0, device=_device) # PCgradで合成できない、たまに発生するスカラー
+    loss_scalar_sum = torch.tensor(0.0, device=_device) # PCgradで合成できない、たまに発生するスカラー
     
     
     # 各損失の勾配算出とリスト化 ------------------------------------------------------------
@@ -838,7 +837,7 @@ def combine_losses_dynamically(
             
             if loss_scalar.grad_fn is None:
                 # 勾配がない場合はスカラーとして蓄積
-                scalar_only_sum += loss_scalar.detach()
+                loss_scalar_sum += loss_scalar.detach()
                 continue
             
             # 指定された評価軸テンソル（pred）で微分を実行
@@ -893,9 +892,9 @@ def combine_losses_dynamically(
     # 二重ループ外で形状情報を整理し、最大要素数でパディングを適用
     max_numel = max(g.numel() for g in grads_list)
     org_grads = []
-    original_shapes = []
+    grad_shapes_org = []
     for g in grads_list:
-        original_shapes.append(g.shape)
+        grad_shapes_org.append(g.shape)
         g_f = g.reshape(-1)
         
         if g_f.numel() < max_numel:
@@ -1015,8 +1014,8 @@ def combine_losses_dynamically(
             print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
         
         return edited_grads_temp
-
-    # grad直交化 ---------------------------------
+        
+    # grad直交化 ===========================================
     
     # 同一カテゴリ同士の直交化（重複除去）
     
@@ -1051,88 +1050,102 @@ def combine_losses_dynamically(
         edited_grads_temp, 
         is_same_category = False
     )
-
-    # 平坦化したテンソルを元の形状に復元して edited_grads を作成 --------------------------
+    
+    # MTLのためにreshapeされたgradを、ベース形状に戻す
     edited_grads = []
     for k, efg in enumerate(edited_grads_temp):
-        orig_s = original_shapes[k]
-        actual_numel = torch.prod(torch.tensor(orig_s)).item()
-        edited_grads.append(efg[:actual_numel].view(orig_s))
+        g_shape_org = grad_shapes_org[k]
+        actual_numel = torch.prod(torch.tensor(g_shape_org)).item()
+        edited_grads.append(efg[:actual_numel].view(g_shape_org))    
 
-    def _accumulate_with_shape_match(base_tensor, add_tensor):
+    # MTL実施済みgrad → 新しいlossの作成 ===========================================
+
+    def _update_grad_with_shape_match(base_grad, add_grad_org):
         """
-        形状の不一致を補正して加算
+        loss合算のために
+        ・MTL実施前のgradへ、実施後のgradを加算        
+        ・gradの形状一致を確認
         """
-        if add_tensor is None or add_tensor.numel() == 0:
-            return base_tensor
+        if add_grad_org is None or add_grad_org.numel() == 0:
+            return base_grad
 
         # スカラー(dim=0)や1次元(dim=1)の勾配を弾く
-        if add_tensor.dim() < 2:
-            return base_tensor
+        if add_grad_org.dim() < 2:
+            return base_grad
         
-        add_t = add_tensor.clone()
-        if add_t.shape != base_tensor.shape:
+        add_grad = add_grad_org.clone()
+        if add_grad.shape != base_grad.shape:
             # 2Dテンソル (B, C) を (B, C, 1, 1) に展開
-            if add_t.dim() == 2:
-                add_t  = add_t.unsqueeze(-1).unsqueeze(-1)
+            if add_grad.dim() == 2:
+                add_grad  = add_grad.unsqueeze(-1).unsqueeze(-1)
             
             # チャンネル数（次元1）の調整
-            if add_t.shape[1] != base_tensor.shape[1] and add_t.shape[1] > 0:
-                if base_tensor.shape[1] % add_t .shape[1] == 0:
-                    repeat_factor = base_tensor.shape[1] // add_t.shape[1]
-                    add_t  = add_t.repeat(1, repeat_factor, 1, 1)
+            if add_grad.shape[1] != base_grad.shape[1] and add_grad.shape[1] > 0:
+                if base_grad.shape[1] % add_grad.shape[1] == 0:
+                    repeat_factor = base_grad.shape[1] // add_grad.shape[1]
+                    add_grad  = add_grad.repeat(1, repeat_factor, 1, 1)
                 else:
                     print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_001") # noise_predで統一しているので起こらないはず
-                    return base_tensor 
+                    return base_grad 
 
             # 空間解像度 (H, W) のリサイズ
-            if add_t.shape[2:] != base_tensor.shape[2:]:
-                if any(t == 0 for t in add_t.shape):
+            if add_grad.shape[2:] != base_grad.shape[2:]:
+                if any(t == 0 for t in add_grad.shape):
                     print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_002")
-                    return base_tensor
+                    return base_grad
                 
-                add_t = torch.nn.functional.interpolate(
-                    add_t, 
-                    size=base_tensor.shape[2:], 
+                add_grad = torch.nn.functional.interpolate(
+                    add_grad, 
+                    size=base_grad.shape[2:], 
                     mode='bilinear', 
                     align_corners=False
                 )
         
-        if add_t.shape == base_tensor.shape: # 形状一致を確認
-            base_tensor += add_t
+        if add_grad.shape == base_grad.shape: # 形状一致を確認
+            base_grad += add_grad
             
-        return base_tensor
-
-    accumulated_grad = torch.zeros_like(grads_list[0])
-    for eg in edited_grads:
-        accumulated_grad = _accumulate_with_shape_match(accumulated_grad, eg)
-    
-    # 最終的なテンソルとしての再構成
-    # 呼び出し側の .mean([1, 2, 3]) に対応するため、スカラー化せず 4次元を維持する
-    total_loss_tensor = torch.zeros_like(base_shape_tensor)
-    
-    # 全ロスの値をテンソル形状を保ったまま合算
-    for i, item in enumerate(losses_list):
-        if i < len(_LOSS_NAMES) and item is not None:
-            loss_value_raw, _ = item
-            l_val = loss_value_raw.clone()
-            # 形状が異なる場合は base_shape_tensor に合わせる
-            if l_val.shape != total_loss_tensor.shape:
-                l_val = l_val.mean().expand_as(total_loss_tensor)
+        # 勾配の異常値を丸める
+        base_grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
             
-            total_loss_tensor += l_val
+        return base_grad
+            
+    # gradに対してMTL結果を反映
+    new_grads = torch.zeros_like(grads_list[0])
+    for edited_grad in edited_grads:
+        new_grads = _update_grad_with_shape_match(new_grads, edited_grad)
+    
+    def _recreate_loss(base_shape_tensor, losses_list, new_grads, loss_scalar_sum):
+        """
+        新しいgradを、新しいlossとして再構成する
+        """
+        
+        # 呼び出し側の .mean([1, 2, 3]) に対応するため、スカラー化せず 4次元を維持する
+        total_loss_tensor = torch.zeros_like(base_shape_tensor)
+    
+        # lossの土台を作成。
+        # 外部ロガーへの進捗報告のため
+        for i, item in enumerate(losses_list):
+            if i < len(_LOSS_NAMES) and item is not None:
+                loss_value_raw, _ = item
+                l_val = loss_value_raw.clone()
+                # 形状が異なる場合は base_shape_tensor に合わせる
+                if l_val.shape != total_loss_tensor.shape:
+                    l_val = l_val.mean().expand_as(total_loss_tensor)
+                
+                total_loss_tensor += l_val
 
-    # 勾配の異常値を丸める
-    accumulated_grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
+        grad_anchor = next(item[1] for item in losses_list if item is not None)
 
-    # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
-    grad_anchor = next(item[1] for item in losses_list if item is not None)
+        # 勾配のすり替え
+        # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
+        all_loss = total_loss_tensor.detach()
+        all_loss += (new_grads * (grad_anchor - grad_anchor.detach())).sum()
+        all_loss += loss_scalar_sum
+        
+        return all_loss
 
-    # 勾配のすり替え
-    # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
-    all_loss = total_loss_tensor.detach()
-    all_loss += (accumulated_grad * (grad_anchor - grad_anchor.detach())).sum()
-    all_loss += scalar_only_sum
+    all_loss = _recreate_loss(base_shape_tensor, losses_list, new_grads, loss_scalar_sum)
                    
     return all_loss
 
