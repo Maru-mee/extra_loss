@@ -147,18 +147,73 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     mean, mean_sq = torch.chunk(pooled, 2, dim=1)
     std = torch.sqrt(mean_sq - mean.pow(2) + eps)
     
-    return mean + std
+    return torch.complex(mean.float(), std.float()) # 複素数化によって、チャンネル数を増やすことなく、それぞれ独立した評価を可能にする
 
-def get_vector(x):
+def get_ch_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
     # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
 
-    eps = 1e-10    
-    direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
+    eps = 1e-10
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=1, eps=eps)
     magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
     vector = (direction * magnitude).to(_dtype)
     return vector
+    
+def get_batch_vector(x):
+    # バッチ方向のベクトル化
 
+    eps = 1e-10     
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=0, eps=eps)
+    magnitude = torch.abs(x)
+    vector = (direction * magnitude).to(_dtype)
+    return vector
+    
+def get_pair_vector(x):
+    # loss_pair専用のベクトル化
+    # x: (B, N_pairs, C)
+    
+    eps = 1e-10
+    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    
+    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=2, eps=eps)
+    magnitude = torch.abs(x)
+    vector = (direction * magnitude).to(_dtype)
+    return vector
+    
+def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c):
+    
+    if torch.is_complex(feat_pred):
+        loss_real = train_util.conditional_loss(
+            feat_pred.real.float(), 
+            feat_target.real.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        loss_imag = train_util.conditional_loss(
+            feat_pred.imag.float(), 
+            feat_target.imag.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        loss = loss_real + loss_imag
+    
+    else:
+        loss = train_util.conditional_loss(
+            feat_pred.float(), 
+            feat_target.float(),
+            reduction=reduction, 
+            loss_type=loss_type,
+            huber_c=huber_c
+        )
+        
+    return loss
+    
 # ==============================================================================================
 
 def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
@@ -194,9 +249,9 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
     feat_pred.mul_(scales)
     feat_target.mul_(scales)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -212,12 +267,12 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
     """
 
-    feat_target   = get_vector(target)
-    feat_pred     = get_vector(noise_pred)
+    feat_target   = get_ch_vector(target)
+    feat_pred     = get_ch_vector(noise_pred)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -232,7 +287,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
     loss_ch_vectorで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     
-    searching_radius :検索半径[px] 相当距離であって、pxそのものではない
+    searching_radius :検索半径[px] 相当距離であって、pxそのものではない。単一の値か、リスト（複数の半径）かを指定
     """
 
     eps = 1e-10
@@ -240,6 +295,9 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
     if not is_above_limit:
         # 解像度が低い場合、計算困難な境界影響が強くなり、境界クロップが発生しやすくなる
         return torch.zeros(1, device=_device, dtype=_dtype)
+        
+    if not isinstance(searching_radius, list):
+        searching_radius = [searching_radius]  
 
     def create_base_grid(B, H, W):
         # 基準となる座標の網を作る
@@ -272,7 +330,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         # 中心点とサンプリング点をベクトル化
         diff = orig_latents - sampled_latents
         
-        vector = get_vector(diff)
+        vector = get_ch_vector(diff)
         
         return vector[valid_indices]
 
@@ -283,23 +341,34 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
         angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
+                
+        sample_points = []
+        for r in searching_radius:
+            for angle in angles:
+                sample_points.append(
+                    sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
+                )
         
-        target_list, pred_list = [], []
-        for angle in angles:
+        num_samples = len(sample_points)      
 
-            sampling_grid = sample_by_angle(target, base_grid, angle.item(), searching_radius, step_h, step_w)
-            mask = (sampling_grid[..., 0].abs() <= 1) & (sampling_grid[..., 1].abs() <= 1) # 有効領域のみ抽出する（画像の外を対象外とする）
-            
-            # grid付近のピクセルから、値を補間しつつ取得する
-            # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
-            sampled_target = torch.nn.functional.grid_sample(
-                target.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-            )
-            sampled_pred = torch.nn.functional.grid_sample(
-                pred.float(), sampling_grid.float(), mode='bilinear', padding_mode='border', align_corners=True
-            )
-            
+        # sample_pointから、値を補間しつつ取得する
+        sampled_all = torch.nn.functional.grid_sample(
+            torch.cat([target, pred], dim=1).repeat(num_samples, 1, 1, 1).float(), # 統合してgrid_sample呼び出し回数を削減
+            torch.cat(sample_points, dim=0).float(),
+            mode='bilinear', 
+            padding_mode='border', 
+            align_corners=True
+        )
+        # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+
+        sampled_all = sampled_all.view(num_samples, B, C * 2, H, W)
+
+        target_list, pred_list = [], []
+        for i in range(num_samples):
+            mask = (sample_points[i][..., 0].abs() <= 1) & (sample_points[i][..., 1].abs() <= 1)  # 有効領域のみ抽出する（画像の外を対象外とする）
+                
             # 基準と比較対象との差分を計算
+            sampled_target, sampled_pred = torch.chunk(sampled_all[i], 2, dim=1)
             target_list.append(calc_vector_diff(target, sampled_target, mask))
             pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
             
@@ -307,9 +376,9 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
 
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
     
-    loss = train_util.conditional_loss(
-        feat_pred.float(), 
-        feat_target.float(),
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none", 
         loss_type=args.loss_type, 
         huber_c=huber_c
@@ -325,6 +394,11 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     光源などの発色を得るために効果的
     
     メインの対象物だけでなく、サブの対象も学習しようとする力が働く。
+    他のloss由来のgradに対する直交性が強い
+    結果、構図がリセットされやすいので、過度な依存は厳禁
+    
+    L1/L2のtarget-pred間で一致をするということは、
+    huber smooth_l1 snrを強制するということ。遊びは減るかも知れないが、縛りは強くなりすぎるかもしれない
     
     使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため計算結果が不安定になりがち。
     target,noise_predにはガウシアンフィルタを予め適用しておくか、不安定にならない数式を使用すること
@@ -337,21 +411,38 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     l2_pred = torch.sqrt(torch.pow(noise_pred, 2).sum(dim=1) + eps)
     l2_target = torch.sqrt(torch.pow(target, 2).sum(dim=1) + eps) 
     
-    # ベース設計。L2の値次第で不安定になる可能性があるので廃止
+    # ベース設計。
+    # L2の値次第で不安定になる可能性があるので廃止
     # feat_pred = l1_pred / l2_pred
     # feat_target = l1_target / l2_target
     
+    # 対数差分方式。ベース設計に対する不安定性を解消した手段
     l1_pred = torch.clamp(l1_pred, min=eps)
     l2_pred = torch.clamp(l2_pred, min=eps)
     l1_target = torch.clamp(l1_target, min=eps)
     l2_target = torch.clamp(l2_target, min=eps)    
     
-    feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
-    feat_target = torch.log(l1_target)  - torch.log(l2_target)
+    # 対数差分のベース設計（下記のベース設計）
+    # feat_pred   = torch.log(l1_pred)    - torch.log(l2_pred)
+    # feat_target = torch.log(l1_target)  - torch.log(l2_target)
+    
+    # 対数差分方式をベクトル化。
+    # 絶対値と向きを評価でき、一部のgradだけが突出して大きくなる状態を防げる。
+    
+    # l1とl2をペアリング (B, N_pairs = HW, C=2) 
+    feat_pred   = torch.stack([l1_pred.flatten(1), l2_pred.flatten(1)], dim=2)
+    feat_target = torch.stack([l1_target.flatten(1), l2_target.flatten(1)], dim=2)
+    
+    feat_pred   = get_pair_vector(feat_pred)
+    feat_target = get_pair_vector(feat_target)  
 
-    loss = train_util.conditional_loss(
-        feat_pred.float(),
-        feat_target.float(),
+    scales = 0.5  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    feat_pred.mul_(scales)
+    feat_target.mul_(scales)
+
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
         reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
@@ -369,26 +460,6 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     poolの分割数
     """
     
-    def apply_distance_weight(i, j, num_grid_w, dtype, device):
-        """
-        グリッド上の距離に応じて重みを生成
-        1マス隣: 1.5倍 / その他: 1.0倍に近い値へ減衰
-        """
-        # インデックスから2次元座標(x, y)を復元
-        dx = (i % num_grid_w - j % num_grid_w).abs().to(dtype)
-        dy = (i // num_grid_w - j // num_grid_w).abs().to(dtype)
-        
-        # 直線距離(ユークリッド距離)に基づいて算出
-        dist = torch.sqrt(dx**2 + dy**2)
-
-        # 1.0(ベース) + 強度 * 指数減衰
-        # dist=1.0 のとき 1.5 になるよう設定
-        strength = 0.5
-        decay = 0.8 
-        weights = 1.0 + strength * torch.exp(-decay * (dist - 1.0))
-        
-        return weights
-
     # サイズから分割数決定
     H, W, _, _ = get_image_hw(target)
     scale_latents = scale_px / 8 # px → latents
@@ -398,6 +469,29 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
     if num_grid_h < 4 or num_grid_w < 4:
         return torch.zeros(1, device=_device, dtype=_dtype)
+        
+    # ペア番地の作成 -------------------------------------------    
+    # ペア間の距離制限を設けることだけが目的。距離制限を考慮しないのならば、不要な行程
+
+    dist_max = 5 # 単位: grid。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか
+
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(num_grid_h, device=_device), 
+        torch.arange(num_grid_w, device=_device), 
+        indexing='ij'
+    )
+    coords = torch.stack(
+        [grid_y.flatten(), grid_x.flatten()], 
+        dim=1
+    )
+
+    num_locations = num_grid_h * num_grid_w
+    indices = torch.triu_indices(num_locations, num_locations, offset=1, device=_device)
+    i, j = indices[0], indices[1]
+    dist = (coords[i] - coords[j]).abs().sum(-1)
+    i, j = i[dist <= dist_max], j[dist <= dist_max]
+        
+    # -------------------------------------------------------]
     
     # 空間情報の抽出
     feat_target = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
@@ -409,32 +503,21 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     
     # 相関行列の生成（要素ごとの差分で番地情報を維持）
     # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
-    feat_target = feat_target.unsqueeze(2) - feat_target.unsqueeze(1)
-    feat_pred = feat_pred.unsqueeze(2) - feat_pred.unsqueeze(1)
+    feat_target = feat_target[:, i, :] - feat_target[:, j, :]
+    feat_pred = feat_pred[:, i, :] - feat_pred[:, j, :]
     
-    num_locations = num_grid_h * num_grid_w
-
-    # 重複と自己相関を排除するインデックスを抽出
-    indices = torch.triu_indices(num_locations, num_locations, offset=1, device=_device)
-    i, j = indices[0], indices[1]  # (i:基準点, j:比較点) 
+    # ベクトル化
+    # これによって、loss_type=l1時の、grad_absのmaxとmeanが等しくなってしまう問題を解消
+    feat_target = get_pair_vector(feat_target)
+    feat_pred   = get_pair_vector(feat_pred)
     
-    # チャンネル次元(dim=-1)を保持したままペアを抽出
-    # (B, num_pairs, C)
-    feat_target = feat_target[:, i, j, :]
-    feat_pred   = feat_pred[:, i, j, :]
-        
-    # 距離重みの適用
-    dist_weight = apply_distance_weight(i, j, num_grid_w, _dtype, _device).unsqueeze(-1)
-    feat_target.mul_(dist_weight)
-    feat_pred.mul_(dist_weight)
-    
-    loss = train_util.conditional_loss(
-        feat_pred, 
+    loss = apply_conditional_loss(
+        feat_pred,
         feat_target,
         reduction="none", 
-        loss_type="l2",  # ほかの関数同様にargs.loss_typeすると差分が検出できず、grad.abs.max = grad.abs.meanになってしまうので、仕方なくL2
+        loss_type=args.loss_type,
         huber_c=huber_c
-    )
+    )  
             
     return loss
     
@@ -513,14 +596,15 @@ def calc_loss_batch_relation(
             # loss_ch_vectorと類似機能
             # poolよりもピクセル単位で細かく比較できるので、キャプション差を捉えやすい（たとえば、人の顔は狭い区間にたくさんのタグがあるため）
 
-            x_vector = get_vector(x_flat)
+            x_vector = get_ch_vector(x_flat)
 
             features = [x_vector]
             
-            boost   = 0.1
+            boost   = 1.0
             norm    = area_latents           
 
-        elif mode=="ch_sparsity":   
+        elif mode=="ch_sparsity":
+            # 設計思想はloss_ch_sparsityと同等
 
             eps=1e-16
             
@@ -530,13 +614,15 @@ def calc_loss_batch_relation(
             x_l1 = torch.clamp(x_l1, min=eps)
             x_l2 = torch.clamp(x_l2, min=eps)
             
-            x_sparsity = torch.log(x_l1) - torch.log(x_l2)
+            x_sparsity  = get_pair_vector(
+                torch.stack([x_l1.flatten(1), x_l2.flatten(1)], dim=2)
+            )
             
             features = [
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 0.01
+            boost   = 1.0
             norm    = area_latents
             
         elif mode=="others": 
@@ -569,41 +655,23 @@ def calc_loss_batch_relation(
                 # 特徴抽出と標準化を一括処理
                 feat_pred, boost, norm  = extract_features(noise_pred[indices], mode)
                 feat_target, _, norm    = extract_features(target[indices], mode)
-                
-                # p=1(L1距離)を採用し、特徴量の差分を定義
-                # 類似度（内積方式）はL2特性を持つため、値が過小になり外れ値ばかりが優先される傾向がある。
-                # それを避けるため、L1ノルム（vector_norm ord=1）にて各要素の差を忠実に拾う。
-                # また、meanではなくsum（または相当する集計）を使用することで、
-                # 正負の誤差による相殺・対消滅を防ぎ、バッチ内の関係性を確実に勾配へ乗せる。
-                diff_pred   = feat_pred.unsqueeze(1)   - feat_pred.unsqueeze(0)
-                diff_target = feat_target.unsqueeze(1) - feat_target.unsqueeze(0)
 
-                # L1ベクトルノルムとして集計し、勾配爆発を抑制
-                if mode=="pixel":
-                    # pixelに関しては、勾配の強弱がdiffにないため、gradが定数にならないようにL2化にする
-                    # diff_predが (B, B, C, H*W) なので、(C, H*W) の次元（dim=(2, 3)）を対象にノルムを計算し、(B, B) にする
-                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=2, dim=(2, 3))
-                    feat_target  = torch.linalg.vector_norm(diff_target, ord=2, dim=(2, 3))
-                else:
-                    feat_pred    = torch.linalg.vector_norm(diff_pred, ord=1, dim=2)
-                    feat_target  = torch.linalg.vector_norm(diff_target, ord=1, dim=2)
-                
+                # batch方向のベクトル化
+                # 【参考】 以前は、２つのbatchのペアのL1距離で計算していたが、
+                # 差が小さいときのアンダーフローや勾配爆発に悩まされたので、差をベクトルとして扱うことにした。ベクトル化するほうがシンプルかつ軽量
+                feat_pred      = get_batch_vector(feat_pred)
+                feat_target    = get_batch_vector(feat_target)
+                                
                 # 補正
                 # boost : 学習効果を調整する効果
                 # norm  : 要素数などによる正規化
                 scales = boost / norm
                 feat_pred   = feat_pred.mul(scales)
                 feat_target = feat_target.mul(scales)
-                
-                # 対角成分（自己相関で０になってしまう無価値な要素）の除外
-                # ペア単位(2x2)の計算のため、sizeは常に2
-                mask = ~torch.eye(2, device=_device, dtype=torch.bool)
-                feat_pred    = feat_pred[mask]
-                feat_target  = feat_target[mask]
 
-                loss = train_util.conditional_loss(
-                    feat_pred.float(),
-                    feat_target.float(),
+                loss = apply_conditional_loss(
+                    feat_pred,
+                    feat_target,
                     reduction="none",
                     loss_type=args.loss_type,
                     huber_c=huber_c
@@ -655,14 +723,13 @@ def combine_losses_dynamically(
     # first_valid_loss : 基本情報取得や初期化のために、Noneではないlossを見つける
     first_valid_loss = next(l for l in losses_list if l is not None)
     first_valid_loss_tensor = first_valid_loss[0] if isinstance(first_valid_loss, tuple) else first_valid_loss
-    all_loss = torch.zeros_like(first_valid_loss_tensor)
     
     device = first_valid_loss_tensor.device
         
     grads_list = [] # 各lossから算出したgrad
     valid_grad_indices = []  # losses_listのインデックスのうち、grads_listに入ったもの
     base_shape_tensor = None # 基準となる形状（通常は最初の有効なロス）を特定するための準備
-    scalar_only_sum = torch.tensor(0.0, device=_device) # PCgradで合成できない、たまに発生するスカラー
+    loss_scalar_sum = torch.tensor(0.0, device=_device) # PCgradで合成できない、たまに発生するスカラー
     
     
     # 各損失の勾配算出とリスト化 ------------------------------------------------------------
@@ -708,6 +775,8 @@ def combine_losses_dynamically(
                     効果：低解像度画像に対する過適合を防ぐ。パレート解の高解像度寄りに寄せる。低解像度画像はハズレ値の学習に専念させる。
                 ・なぜgradではなくlossに適用したのか。→ 低解像度における高いgradは許容できないノイズである可能性がある。lossという目線でフィルタリングすべき
                 ・loss_base :これを超えるかどうかで減衰しやすさが変わる。
+                
+                ToDo: snrによってlossの値が変わるのが普通なので、snr（あるいはloss_EMA=f(snr)の概念）も引数として必要。とはいえ、高解像度であればカットオフリスクはないので、このままでも高解像度中心としたパレート解算出という目的は果たせているはず。
                 """
                 
                 ideal_reso = 1024 # 理想的な解像度。この解像度以上であれば減衰ほぼなし                  
@@ -768,7 +837,7 @@ def combine_losses_dynamically(
             
             if loss_scalar.grad_fn is None:
                 # 勾配がない場合はスカラーとして蓄積
-                scalar_only_sum += loss_scalar.detach()
+                loss_scalar_sum += loss_scalar.detach()
                 continue
             
             # 指定された評価軸テンソル（pred）で微分を実行
@@ -823,9 +892,9 @@ def combine_losses_dynamically(
     # 二重ループ外で形状情報を整理し、最大要素数でパディングを適用
     max_numel = max(g.numel() for g in grads_list)
     org_grads = []
-    original_shapes = []
+    grad_shapes_org = []
     for g in grads_list:
-        original_shapes.append(g.shape)
+        grad_shapes_org.append(g.shape)
         g_f = g.reshape(-1)
         
         if g_f.numel() < max_numel:
@@ -945,8 +1014,8 @@ def combine_losses_dynamically(
             print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
         
         return edited_grads_temp
-
-    # grad直交化 ---------------------------------
+        
+    # grad直交化 ===========================================
     
     # 同一カテゴリ同士の直交化（重複除去）
     
@@ -981,88 +1050,102 @@ def combine_losses_dynamically(
         edited_grads_temp, 
         is_same_category = False
     )
-
-    # 平坦化したテンソルを元の形状に復元して edited_grads を作成 --------------------------
+    
+    # MTLのためにreshapeされたgradを、ベース形状に戻す
     edited_grads = []
     for k, efg in enumerate(edited_grads_temp):
-        orig_s = original_shapes[k]
-        actual_numel = torch.prod(torch.tensor(orig_s)).item()
-        edited_grads.append(efg[:actual_numel].view(orig_s))
+        g_shape_org = grad_shapes_org[k]
+        actual_numel = torch.prod(torch.tensor(g_shape_org)).item()
+        edited_grads.append(efg[:actual_numel].view(g_shape_org))    
 
-    def _accumulate_with_shape_match(base_tensor, add_tensor):
+    # MTL実施済みgrad → 新しいlossの作成 ===========================================
+
+    def _update_grad_with_shape_match(base_grad, add_grad_org):
         """
-        形状の不一致を補正して加算
+        loss合算のために
+        ・MTL実施前のgradへ、実施後のgradを加算        
+        ・gradの形状一致を確認
         """
-        if add_tensor is None or add_tensor.numel() == 0:
-            return base_tensor
+        if add_grad_org is None or add_grad_org.numel() == 0:
+            return base_grad
 
         # スカラー(dim=0)や1次元(dim=1)の勾配を弾く
-        if add_tensor.dim() < 2:
-            return base_tensor
+        if add_grad_org.dim() < 2:
+            return base_grad
         
-        add_t = add_tensor.clone()
-        if add_t.shape != base_tensor.shape:
+        add_grad = add_grad_org.clone()
+        if add_grad.shape != base_grad.shape:
             # 2Dテンソル (B, C) を (B, C, 1, 1) に展開
-            if add_t.dim() == 2:
-                add_t  = add_t.unsqueeze(-1).unsqueeze(-1)
+            if add_grad.dim() == 2:
+                add_grad  = add_grad.unsqueeze(-1).unsqueeze(-1)
             
             # チャンネル数（次元1）の調整
-            if add_t.shape[1] != base_tensor.shape[1] and add_t.shape[1] > 0:
-                if base_tensor.shape[1] % add_t .shape[1] == 0:
-                    repeat_factor = base_tensor.shape[1] // add_t.shape[1]
-                    add_t  = add_t.repeat(1, repeat_factor, 1, 1)
+            if add_grad.shape[1] != base_grad.shape[1] and add_grad.shape[1] > 0:
+                if base_grad.shape[1] % add_grad.shape[1] == 0:
+                    repeat_factor = base_grad.shape[1] // add_grad.shape[1]
+                    add_grad  = add_grad.repeat(1, repeat_factor, 1, 1)
                 else:
                     print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_001") # noise_predで統一しているので起こらないはず
-                    return base_tensor 
+                    return base_grad 
 
             # 空間解像度 (H, W) のリサイズ
-            if add_t.shape[2:] != base_tensor.shape[2:]:
-                if any(t == 0 for t in add_t.shape):
+            if add_grad.shape[2:] != base_grad.shape[2:]:
+                if any(t == 0 for t in add_grad.shape):
                     print_storage("keep", "skip:_accumulate_with_shape_match: unexpected_case_002")
-                    return base_tensor
+                    return base_grad
                 
-                add_t = torch.nn.functional.interpolate(
-                    add_t, 
-                    size=base_tensor.shape[2:], 
+                add_grad = torch.nn.functional.interpolate(
+                    add_grad, 
+                    size=base_grad.shape[2:], 
                     mode='bilinear', 
                     align_corners=False
                 )
         
-        if add_t.shape == base_tensor.shape: # 形状一致を確認
-            base_tensor += add_t
+        if add_grad.shape == base_grad.shape: # 形状一致を確認
+            base_grad += add_grad
             
-        return base_tensor
-
-    accumulated_grad = torch.zeros_like(grads_list[0])
-    for eg in edited_grads:
-        accumulated_grad = _accumulate_with_shape_match(accumulated_grad, eg)
-    
-    # 最終的なテンソルとしての再構成
-    # 呼び出し側の .mean([1, 2, 3]) に対応するため、スカラー化せず 4次元を維持する
-    total_loss_tensor = torch.zeros_like(base_shape_tensor)
-    
-    # 全ロスの値をテンソル形状を保ったまま合算
-    for i, item in enumerate(losses_list):
-        if i < len(_LOSS_NAMES) and item is not None:
-            loss_value_raw, _ = item
-            l_val = loss_value_raw.clone()
-            # 形状が異なる場合は base_shape_tensor に合わせる
-            if l_val.shape != total_loss_tensor.shape:
-                l_val = l_val.mean().expand_as(total_loss_tensor)
+        # 勾配の異常値を丸める
+        base_grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
             
-            total_loss_tensor += l_val
+        return base_grad
+            
+    # gradに対してMTL結果を反映
+    new_grads = torch.zeros_like(grads_list[0])
+    for edited_grad in edited_grads:
+        new_grads = _update_grad_with_shape_match(new_grads, edited_grad)
+    
+    def _recreate_loss(base_shape_tensor, losses_list, new_grads, loss_scalar_sum):
+        """
+        新しいgradを、新しいlossとして再構成する
+        """
+        
+        # 呼び出し側の .mean([1, 2, 3]) に対応するため、スカラー化せず 4次元を維持する
+        total_loss_tensor = torch.zeros_like(base_shape_tensor)
+    
+        # lossの土台を作成。
+        # 外部ロガーへの進捗報告のため
+        for i, item in enumerate(losses_list):
+            if i < len(_LOSS_NAMES) and item is not None:
+                loss_value_raw, _ = item
+                l_val = loss_value_raw.clone()
+                # 形状が異なる場合は base_shape_tensor に合わせる
+                if l_val.shape != total_loss_tensor.shape:
+                    l_val = l_val.mean().expand_as(total_loss_tensor)
+                
+                total_loss_tensor += l_val
 
-    # 勾配の異常値を丸める
-    accumulated_grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
+        grad_anchor = next(item[1] for item in losses_list if item is not None)
 
-    # 勾配を注入するためのアンカー（通常はnoise_pred）を抽出
-    grad_anchor = next(item[1] for item in losses_list if item is not None)
+        # 勾配のすり替え
+        # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
+        all_loss = total_loss_tensor.detach()
+        all_loss += (new_grads * (grad_anchor - grad_anchor.detach())).sum()
+        all_loss += loss_scalar_sum
+        
+        return all_loss
 
-    # 勾配のすり替え
-    # total_loss_tensorをdetachして元の勾配を切り離し、PCGrad済みの勾配（grad_anchor経由）を合成
-    all_loss = total_loss_tensor.detach()
-    all_loss += (accumulated_grad * (grad_anchor - grad_anchor.detach())).sum()
-    all_loss += scalar_only_sum
+    all_loss = _recreate_loss(base_shape_tensor, losses_list, new_grads, loss_scalar_sum)
                    
     return all_loss
 
@@ -1118,7 +1201,7 @@ def get_loss_all(
     loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
-            target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = 2.0
+        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0]
     )
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
