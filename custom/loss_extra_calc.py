@@ -158,7 +158,7 @@ def get_ch_vector(x):
     
     def calc_vector(x):
         direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
-        magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
+        magnitude = torch.abs(x) + eps # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
         vector = (direction * magnitude).to(_dtype)
         return vector
 
@@ -183,7 +183,7 @@ def compare_vector(mode, x):
     # ユニーク化。設計意図は関数末尾を参照
     v_diff = (v1 - v2) * 0.5
     v_sum  = (v1 + v2) * 0.5
-    v_dot  = v1 * v2
+    v_dot  = v1 * v2 +  1e-6
 
     def get_vector(x):
         # バッチ方向のベクトル化
@@ -223,6 +223,11 @@ def compare_vector(mode, x):
      magnitudeで、内積v1*v2を使用することで、v1,v2の直交化を評価できるようになる。
      学習においては、ペア同士に相関あるかないか、gradを直接通すか否かに直結する重要な要素。
      本来。maginitudeは単なるtorch.abs(x)でよかったのだが、それはあまり価値のないパラメータなので、v_dotを適用してメモリスペースを節約する
+     
+    ・ 内積に小さい値を加算する理由
+      0になって、magnitudeが0になった途端、directionが評価不能になる。
+      すると、直交状態からの復帰が困難になる
+      具体的には、主体構造だけがそのままで、小物や道具類が消える。
     """
     
 def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c):
