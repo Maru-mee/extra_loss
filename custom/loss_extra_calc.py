@@ -146,20 +146,27 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     pooled = torch.nn.functional.adaptive_avg_pool2d(combined, output_size)
 
     mean, mean_sq = torch.chunk(pooled, 2, dim=1)
-    std = torch.sqrt(mean_sq - mean.pow(2) + eps)
+    var = mean_sq - mean.pow(2)
     
-    return torch.complex(mean.float(), std.float()) # 複素数化によって、チャンネル数を増やすことなく、それぞれ独立した評価を可能にする
+    return torch.complex(mean.float(), var.float()) # 複素数化によって、チャンネル数を増やすことなく、それぞれ独立した評価を可能にする
 
 def get_ch_vector(x):
     # latents情報をベクトル表現に直して、勾配予測をアシストする
     # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
 
     eps = 1e-10
-    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
     
-    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=1, eps=eps)
-    magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
-    vector = (direction * magnitude).to(_dtype)
+    def calc_vector(x):
+        direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
+        magnitude = torch.abs(x) # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
+        vector = (direction * magnitude).to(_dtype)
+        return vector
+
+    if torch.is_complex(x):
+        vector = calc_vector(x.real) + calc_vector(x.imag)
+    else:
+        vector = calc_vector(x)
+        
     return vector
     
 def compare_vector(mode, x):
@@ -180,18 +187,21 @@ def compare_vector(mode, x):
 
     def get_vector(x):
         # バッチ方向のベクトル化
-        eps = 1e-10     
-        x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
 
-        magnitude = v_dot
-        
-        if mode == "batch":
-            direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=1, eps=eps)
-        elif mode == "pair":            
-            direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=2, eps=eps)
+        def calc_direction(x):
+            eps = 1e-10 
+            if mode == "batch":
+                direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
+            elif mode == "pair":            
+                direction = torch.nn.functional.normalize(x.float(), p=2, dim=2, eps=eps)
+            return direction
             
-        vector = direction * magnitude
-        return vector
+        magnitude = v_dot            
+            
+        if torch.is_complex(x):
+            return calc_direction(x.real) * magnitude.real + calc_direction(x.imag) * magnitude.imag
+        else:
+            return calc_direction(x) * magnitude
 
     if mode == "batch":        
         result = torch.stack([get_vector(v_sum), get_vector(v_diff)], dim=1).squeeze(0)
