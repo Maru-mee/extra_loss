@@ -11,8 +11,9 @@ is_debug_mode           = False
 is_debug_mode_grad      = False
 is_debug_mode_PCgrad    = False
 is_logging_grad         = False
+is_debug_time           = False
 # ---------------------------------------------------------
-
+import time
 import collections
 import cv2
 import math
@@ -161,30 +162,61 @@ def get_ch_vector(x):
     vector = (direction * magnitude).to(_dtype)
     return vector
     
-def get_batch_vector(x):
-    # バッチ方向のベクトル化
+def compare_vector(mode, x):
+    # xにおける、ベクトル２ペアの相関を特徴量化する関数
+    
+    # mode = batch バッチ方向の比較.B=2（となるように、loss_batchは設計している）
+    # mode = pair loss_pair専用のペア間の比較. x: (B, N_pairs, C)という、N_pairチャンネル方向にペアをスタックした1つのテンソル
 
-    eps = 1e-10     
-    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+    if mode == "batch":
+        v1, v2 = torch.chunk(x, chunks=2, dim=0) # バッチ要素を2分割
+    elif mode == "pair":
+        v1, v2 = torch.chunk(x, chunks=2, dim=2) # チャンネル要素を2分割してv1, v2を復元
     
-    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=0, eps=eps)
-    magnitude = torch.abs(x)
-    vector = (direction * magnitude).to(_dtype)
-    return vector
+    # ユニーク化。設計意図は関数末尾を参照
+    v_diff = (v1 - v2) * 0.5
+    v_sum  = (v1 + v2) * 0.5
+    v_dot  = v1 * v2
+
+    def get_vector(x):
+        # バッチ方向のベクトル化
+        eps = 1e-10     
+        x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
+
+        magnitude = v_dot
+        
+        if mode == "batch":
+            direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=1, eps=eps)
+        elif mode == "pair":            
+            direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=2, eps=eps)
+            
+        vector = direction * magnitude
+        return vector
+
+    if mode == "batch":        
+        result = torch.stack([get_vector(v_sum), get_vector(v_diff)], dim=1).squeeze(0)
+    elif mode == "pair":
+        result = torch.stack([get_vector(v_sum), get_vector(v_diff)], dim=2)    
+        
+    return result
     
-def get_pair_vector(x):
-    # loss_pair専用のベクトル化
-    # x: (B, N_pairs, C)
+    """
+     v1,v2のユニーク化の設計思想 ------------------------
+     基本的には、v1,v2が一義的に表現できるかが重要
+     
+     和と差の合計が１（導入前と同じ）になるように、それぞれ0.5倍
+     本来、差分を比較するためだけなら、 v_diffだけで十分。しかし実用上は下記の問題があるため、v_sumも必要
+     ・ v1及びv2両方とも小さい場合のアンダーフロー対策
+     ・ v1及びv2両方とも大きすぎる場合の勾配爆発対策（というより、lossのスケール統一）
+     ・ v1とv2ベクトルが逆転していた場合に、diffが同値にならないようにするための予防措置 
     
-    eps = 1e-10
-    x_mod = x.real if torch.is_complex(x) else x # 実部、すなわち、adaptive_avg_pool2d_for_latentsのmean成分のみ使用
-    
-    direction = torch.nn.functional.normalize(x_mod.float(), p=2, dim=2, eps=eps)
-    magnitude = torch.abs(x)
-    vector = (direction * magnitude).to(_dtype)
-    return vector
+     magnitudeで、内積v1*v2を使用することで、v1,v2の直交化を評価できるようになる。
+     学習においては、ペア同士に相関あるかないか、gradを直接通すか否かに直結する重要な要素。
+     本来。maginitudeは単なるtorch.abs(x)でよかったのだが、それはあまり価値のないパラメータなので、v_dotを適用してメモリスペースを節約する
+    """
     
 def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c):
+    # 基本的には、sd-scripts/train_utilからの参照
     
     if torch.is_complex(feat_pred):
         loss_real = train_util.conditional_loss(
@@ -216,22 +248,32 @@ def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c
     
 # ==============================================================================================
 
-def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
+def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     画像単体のpool分割したうえで、それぞれの領域を比較する。
     これがあることで、画像単体としてのバランスや、人物の基本骨格が取れるようになる
     骨格が一致しなければ、あらゆる詳細学習が進まない
     しかし、latentsにおけるmean比較というのは茶色くなりがちなので、強い強度での適用は控えたほうがいい
+    
+    scale_px : 元画像サイズスケールでの、１個あたりのgridサイズ
+    poolの分割数
     """
     
-    if not pool_num == 1: # pool_num=1を特別に許可する。平均色の学習としてはどんな解像度でも有意義
-        if not is_above_limit:  # 解像度が低い場合、信頼性が著しく低下する
-            return torch.zeros(1, device=_device, dtype=_dtype)
+    
+    # サイズから分割数決定
+    H, W, _, _ = get_image_hw(target)
+    scale_latents = scale_px / 8 # px → latents
+    num_grid_h = int(max(1, H // scale_latents))
+    num_grid_w = int(max(1, W // scale_latents))
+    
+    # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
+    if num_grid_h < 4 or num_grid_w < 4:
+        return torch.zeros(1, device=_device, dtype=_dtype)
 
-    def extract_features(x, pool_num):
+    def extract_features(x, num_grid_h, num_grid_w):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
                     
-        pool_x  = adaptive_avg_pool2d_for_latents(x.float(), (pool_num, pool_num))
+        pool_x  = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                              
         features = [
             pool_x.flatten(1), 
@@ -240,10 +282,10 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
         return torch.cat(features, dim=1)
     
     # 特徴抽出と標準化を一括処理
-    feat_pred   = extract_features(target, pool_num)
-    feat_target = extract_features(noise_pred, pool_num)
-    
-    boost = 0.1
+    feat_pred   = extract_features(target, num_grid_h, num_grid_w)
+    feat_target = extract_features(noise_pred, num_grid_h, num_grid_w)
+
+    boost = 0.5
     scales = boost
     
     feat_pred.mul_(scales)
@@ -254,7 +296,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, pool_num):
         feat_target,
         reduction="none",
         loss_type=args.loss_type,
-        huber_c=huber_c
+        huber_c=huber_c + 0.2  # 他のlossよりもtunestep=0側でのL2特性を強めて、過適合を防ぐ
     )
     
     return loss
@@ -269,6 +311,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
 
     feat_target   = get_ch_vector(target)
     feat_pred     = get_ch_vector(noise_pred)
+    # 【補足】 潜在的にはベクトル逆転収束＝ V_C1 * V_C2がtarget,pred間で反転 = lossゼロを許容してしまうが、その他のloss多数で抑制されるはず。計算コスト削減のために妥協
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -323,14 +366,16 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
 
     def calc_vector_diff(orig_latents, sampled_latents, mask):
         # 中心点origに対する、sample点情報を計算
+                
+        # 中心点とサンプリング点をベクトル化        
+        vector = compare_vector("pair", 
+            torch.cat([
+                orig_latents.flatten(2).transpose(1, 2), 
+                sampled_latents.flatten(2).transpose(1, 2)
+            ], dim=2)
+        )
         
-        #ターゲットの差分を重みとする。
-        valid_indices = mask.unsqueeze(1).expand_as(orig_latents)
-        
-        # 中心点とサンプリング点をベクトル化
-        diff = orig_latents - sampled_latents
-        
-        vector = get_ch_vector(diff)
+        valid_indices = mask.flatten(1).unsqueeze(-1).unsqueeze(-1).expand_as(vector)
         
         return vector[valid_indices]
 
@@ -397,9 +442,6 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     他のloss由来のgradに対する直交性が強い
     結果、構図がリセットされやすいので、過度な依存は厳禁
     
-    L1/L2のtarget-pred間で一致をするということは、
-    huber smooth_l1 snrを強制するということ。遊びは減るかも知れないが、縛りは強くなりすぎるかもしれない
-    
     使用上の注意：ノイズ成分がL2ノルムを不当に底上げするため計算結果が不安定になりがち。
     target,noise_predにはガウシアンフィルタを予め適用しておくか、不安定にならない数式を使用すること
     """
@@ -433,10 +475,11 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_pred   = torch.stack([l1_pred.flatten(1), l2_pred.flatten(1)], dim=2)
     feat_target = torch.stack([l1_target.flatten(1), l2_target.flatten(1)], dim=2)
     
-    feat_pred   = get_pair_vector(feat_pred)
-    feat_target = get_pair_vector(feat_target)  
+    feat_pred   = compare_vector("pair", feat_pred)
+    feat_target = compare_vector("pair", feat_target)
+    # 【補足】 L1-L2という設計原理だけでなく、L1+L2をする作用も存在するが、まあ一致しているに越したことないので、そのままにしておきます（grad過剰累計は気になりますが…）
 
-    scales = 0.5  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    scales = 0.1  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
     feat_pred.mul_(scales)
     feat_target.mul_(scales)
 
@@ -501,15 +544,18 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = feat_target.flatten(2).transpose(1, 2)
     feat_pred = feat_pred.flatten(2).transpose(1, 2)
     
-    # 相関行列の生成（要素ごとの差分で番地情報を維持）
-    # (B, HW, 1, C) - (B, 1, HW, C) -> (B, HW, HW, C)
-    feat_target = feat_target[:, i, :] - feat_target[:, j, :]
-    feat_pred = feat_pred[:, i, :] - feat_pred[:, j, :]
+    # (B, HW, 1, C) と (B, 1, HW, C)
+    feat_target = torch.cat([feat_target[:, i, :], feat_target[:, j, :]], dim=2)
+    feat_pred   = torch.cat([feat_pred[:, i, :], feat_pred[:, j, :]], dim=2)
     
     # ベクトル化
     # これによって、loss_type=l1時の、grad_absのmaxとmeanが等しくなってしまう問題を解消
-    feat_target = get_pair_vector(feat_target)
-    feat_pred   = get_pair_vector(feat_pred)
+    feat_target = compare_vector("pair", feat_target)
+    feat_pred   = compare_vector("pair", feat_pred)
+
+    scales = 0.5  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    feat_pred.mul_(scales)
+    feat_target.mul_(scales)
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -522,7 +568,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     return loss
     
 def calc_loss_batch_relation(
-    target, noise_pred, args, huber_c, area_latents, is_above_limit, mode, pool_num=1,
+    target, noise_pred, args, huber_c, area_latents, is_above_limit, mode, scale_px=1024,
 ):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
@@ -546,10 +592,7 @@ def calc_loss_batch_relation(
     if not is_above_limit:
         # 解像度が低い場合、いくつかの統計値に対する信頼性が著しく低下する可能性がある
         
-        if mode == "pool" and pool_num == 1:
-            # この条件ならば、平均色をbatch比較する意義があるので、skipしたくない
-            pass
-        elif mode=="ch_vector" or mode=="pixel" or mode=="ch_sparsity":
+        if mode=="ch_vector" or mode=="pixel" or mode=="ch_sparsity":
             # これらのモードであればピクセル同士の比較であるため、解像度に関係なく使用可能
             pass          
         else:
@@ -577,20 +620,21 @@ def calc_loss_batch_relation(
             
         elif mode=="pool":
             # 各領域のベクトルの平均値を比較する
-            # 注：    輝度meanは実質ここで評価されているので、ほかのloss_batchでは比較するべきではない            
-            #        7分割のような細かな分割設計にしたい場合は、必ず3分割などを中継して、レイアウトを学ばせること。
-            #       3x3だけだと物足りないように感じるかもしれないが、ほとんどの画像で3x3を学べれば、実質細かい部分もわかる
-            #       5x5を追加することで、高周波側へ逃がしてしまう力を弱める。
-            #       7x7以上はスライス跡が目立つのでやめるべき。縦長or横長では分割困難になる
                         
-            pool_x = adaptive_avg_pool2d_for_latents(x.float(), (pool_num, pool_num))
+            # サイズから分割数決定
+            H, W, _, _ = get_image_hw(x)
+            scale_latents = scale_px / 8 # px → latents
+            num_grid_h = int(max(1, H // scale_latents))
+            num_grid_w = int(max(1, W // scale_latents))            
+                        
+            pool_x = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                                  
             features = [
                 pool_x.flatten(1), 
             ]
             
-            boost   = 0.01 # 基本的にpoolによるbatch比較は、評価する領域が粗いせいか、gradがやたら大きくなりやすく、等倍だと支配的になりすぎる
-            norm    = pool_num ** 2
+            boost   = 0.5
+            norm    = num_grid_h * num_grid_w
             
         elif mode=="ch_vector":
             # loss_ch_vectorと類似機能
@@ -601,7 +645,7 @@ def calc_loss_batch_relation(
             features = [x_vector]
             
             boost   = 1.0
-            norm    = area_latents           
+            norm    = area_latents
 
         elif mode=="ch_sparsity":
             # 設計思想はloss_ch_sparsityと同等
@@ -614,7 +658,7 @@ def calc_loss_batch_relation(
             x_l1 = torch.clamp(x_l1, min=eps)
             x_l2 = torch.clamp(x_l2, min=eps)
             
-            x_sparsity  = get_pair_vector(
+            x_sparsity  = compare_vector("pair", 
                 torch.stack([x_l1.flatten(1), x_l2.flatten(1)], dim=2)
             )
             
@@ -659,8 +703,8 @@ def calc_loss_batch_relation(
                 # batch方向のベクトル化
                 # 【参考】 以前は、２つのbatchのペアのL1距離で計算していたが、
                 # 差が小さいときのアンダーフローや勾配爆発に悩まされたので、差をベクトルとして扱うことにした。ベクトル化するほうがシンプルかつ軽量
-                feat_pred      = get_batch_vector(feat_pred)
-                feat_target    = get_batch_vector(feat_target)
+                feat_pred      = compare_vector("batch", feat_pred)
+                feat_target    = compare_vector("batch", feat_target)
                                 
                 # 補正
                 # boost : 学習効果を調整する効果
@@ -690,16 +734,14 @@ _LOSS_CONFIG = {
     # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool_3x": (1.0, 1.0, 0.0, ["pool", "base"]),
-    "pool_5x": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    "ch_vector": (1.0, 1.0, 0.01, [None, None]),
-    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
-    "sparsity":  (1.0, 1.0, 0.0, [None, None]),
-    "pair_128px": (1.0, 1.0, 0.0, ["pair", "base"]),
-    "pair_64px": (1.0, 1.0, 0.0, ["pair", "sub"]),
-    "pair_32px": (1.0, 1.0, 0.0, ["pair", "sub"]),
-    "batch_p_3x": (1.0, 1.0, 0.0, ["batch_pool", "base"]),
-    "batch_p_5x": (1.0, 1.0, 0.0, ["batch_pool", "sub"]),
+    "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]), # 学習初期の恩恵は大きいが、終盤は邪魔しがちなのでgamma強め
+    "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
+    "ch_vector": (0.5, 1.0, 0.01, [None, None]),
+    "ch_flow_r2":  (0.5, 1.0, 0.0, [None, None]),
+    "sparsity":  (0.5, 1.0, 0.0, [None, None]),
+    "pair_32px": (0.5, 1.0, 0.0, [None, None]),
+    "batch_p_128px": (1.0, 1.0, 0.0, ["batch_pool", "base"]),
+    "batch_p_64px": (1.0, 1.0, 0.0, ["batch_pool", "sub"]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     "batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
     "batch_spars": (1.0, 1.0, 0.0, [None, None]),    
@@ -1075,6 +1117,8 @@ def combine_losses_dynamically(
         
         add_grad = add_grad_org.clone()
         if add_grad.shape != base_grad.shape:
+            print_storage("keep", f"Shape Mismatch! pred:{base_grad.shape} vs grad:{add_grad.shape}")
+            
             # 2Dテンソル (B, C) を (B, C, 1, 1) に展開
             if add_grad.dim() == 2:
                 add_grad  = add_grad.unsqueeze(-1).unsqueeze(-1)
@@ -1191,11 +1235,11 @@ def get_loss_all(
     #target_gaus    = filtering_gaussian(target_mod)
     #pred_gaus      = filtering_gaussian(pred_mod)  
     
-    loss_pool_3x, loss_pool_5x = [
+    loss_pool_128px, loss_pool_64px = [
         calc_loss_pool(
-            target_mod, pred_mod, args, huber_c, is_above_limit=True, pool_num=n
+            target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=sp
         )
-        for n in [3, 5]
+        for sp in [128, 64]
     ]
     
     loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
@@ -1206,18 +1250,15 @@ def get_loss_all(
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
     
-    loss_pair_corr_128px, loss_pair_corr_64px, loss_pair_corr_32px = [
-        calc_loss_pair_correlation(
-            target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=s
-        )
-        for s in [128, 64, 32]
-    ]
+    loss_pair_corr_32px = calc_loss_pair_correlation(
+        target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=32
+    )
     
-    loss_batch_pool_3x, loss_batch_pool_5x = [
+    loss_batch_pool_128px, loss_batch_pool_64px = [
         calc_loss_batch_relation(
-            target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", pool_num=n,
+            target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", scale_px=sp
         )
-        for n in [3, 5]
+        for sp in [128, 64]
     ]
 
     loss_batch_pixel = calc_loss_batch_relation(
@@ -1236,17 +1277,17 @@ def get_loss_all(
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
-        loss_pool_3x,
-        loss_pool_5x,
+        loss_pool_128px,
+        loss_pool_64px,
         loss_ch_vector,
         loss_ch_flow_r2,
         loss_sparsity,
-        loss_pair_corr_128px,
-        loss_pair_corr_64px,
+        # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
+        # loss_pair_corr_64px,  # 廃止。同上
         loss_pair_corr_32px,
-        loss_batch_pool_3x,
-        loss_batch_pool_5x, 
-        loss_batch_pixel,       
+        loss_batch_pool_128px,
+        loss_batch_pool_64px,
+        loss_batch_pixel,
         loss_batch_ch_vector,
         loss_batch_sparsity,
     ]
@@ -1274,14 +1315,21 @@ def calc_extra_losses(
     global _current_snr_weight, _current_mask
     _current_snr_weight = snr_weight_view
     _current_mask = current_mask
+    
+    if is_debug_time:
+        start_time = time.time()
         
     # loss値の各種計算
     all_computed_losses = get_loss_all(loss, target, noise_pred, args, huber_c)        
-    
+
     # ロスの集計と重み付け
     _, _, _, area_img = get_image_hw(target)
     loss = combine_losses_dynamically(all_computed_losses, global_step, area_img)
-
+    
+    if is_debug_time:
+        split_time_01 = time.time() - start_time
+        print(f"区間タイム: {split_time_01:.4f}sec")
+        
     if is_print_screen:
         print_storage("print")
 
