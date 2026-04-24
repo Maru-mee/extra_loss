@@ -273,12 +273,11 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     feat_pred   = extract_features(target, num_grid_h, num_grid_w)
     feat_target = extract_features(noise_pred, num_grid_h, num_grid_w)
 
-    boost = 0.5
-    scales = boost
+    scales = 0.5
     
     if scales != 1.0:
-        feat_pred.mul_(scales)
-        feat_target.mul_(scales)
+        feat_pred.mul(scales)
+        feat_target.mul(scales)
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -301,6 +300,11 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     feat_target   = get_ch_vector(target)
     feat_pred     = get_ch_vector(noise_pred)
     # 【補足】 潜在的にはベクトル逆転収束＝ V_C1 * V_C2がtarget,pred間で反転 = lossゼロを許容してしまうが、その他のloss多数で抑制されるはず。計算コスト削減のために妥協
+
+    scales = 1.0
+    if scales != 1.0:
+        feat_pred.mul(scales)
+        feat_target.mul(scales)
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -409,6 +413,11 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         return torch.cat(target_list), torch.cat(pred_list)
 
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
+
+    scales = 0.5
+    if scales != 1.0:
+        feat_pred.mul(scales)
+        feat_target.mul(scales)
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -465,6 +474,7 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_target = torch.stack([l1_target.flatten(1), l2_target.flatten(1)], dim=2)
     
     # スケールを切り落とし方向だけにすることで、ピーキーな性質を無くす。このlossは暴君であり、オーバーシュートが大きいため、normalizeは効果大
+    # この結果、loss_baseに対する直交成分になりやすくなる
     # 注. compare_vectorがスケールの大きさを感知できる、なんらかの手段が必須。
     feat_pred   = torch.nn.functional.normalize(feat_pred,   p=2, dim=2, eps=eps)
     feat_target = torch.nn.functional.normalize(feat_target, p=2, dim=2, eps=eps)
@@ -473,10 +483,10 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_target = compare_vector("pair", feat_target)
     # 【補足】 L1-L2という設計原理だけでなく、L1+L2をする作用も存在するが、まあ一致しているに越したことないので、そのままにしておきます（grad過剰累計は気になりますが…）
 
-    scales = 1.0  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    scales = 1.0
     if scales != 1.0:
-        feat_pred.mul_(scales)
-        feat_target.mul_(scales)
+        feat_pred.mul(scales)
+        feat_target.mul(scales)
 
     loss = apply_conditional_loss(
         feat_pred,
@@ -548,10 +558,10 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = compare_vector("pair", feat_target)
     feat_pred   = compare_vector("pair", feat_pred)
 
-    scales = 0.2  # 他のlossと比べて影響度が大きく、1.0だと既存情報のリセットが強過ぎる
+    scales = 0.5
     if scales != 1.0:
-        feat_pred.mul_(scales)
-        feat_target.mul_(scales)
+        feat_pred.mul(scales)
+        feat_target.mul(scales)
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -611,7 +621,7 @@ def calc_loss_batch_relation(
             
             features = [x_flat]
             
-            boost   = 1.0
+            boost   = 2.0
             norm    = area_latents
             
         elif mode=="pool":
@@ -640,7 +650,7 @@ def calc_loss_batch_relation(
 
             features = [x_vector]
             
-            boost   = 1.0
+            boost   = 2.0
             norm    = area_latents
 
         elif mode=="ch_sparsity":
@@ -662,7 +672,7 @@ def calc_loss_batch_relation(
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 1.0
+            boost   = 2.0
             norm    = area_latents
             
         elif mode=="others": 
@@ -705,14 +715,12 @@ def calc_loss_batch_relation(
                 # 補正
                 # boost : 学習効果を調整する効果
                 # norm  : 要素数などによる正規化
-                scales = boost / norm
-                feat_pred   = feat_pred.mul(scales)
-                feat_target = feat_target.mul(scales)
-                
-                if scales != 1.0:
-                    feat_pred.mul_(scales)
-                    feat_target.mul_(scales)
-
+                boost_common = 1.0
+                scales = (boost * boost_common) / norm
+                if scales != 1.0:                    
+                    feat_pred.mul(scales)
+                    feat_target.mul(scales)
+                    
                 loss = apply_conditional_loss(
                     feat_pred,
                     feat_target,
@@ -734,16 +742,16 @@ _LOSS_CONFIG = {
     # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]), # 学習初期の恩恵は大きいが、終盤は邪魔しがちなのでgamma強め
+    "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    "ch_vector": (0.5, 1.0, 0.01, [None, None]),
-    "ch_flow_r2":  (0.5, 1.0, 0.0, [None, None]),
-    "sparsity":  (0.5, 1.0, 0.0, [None, None]),
-    "pair_32px": (0.5, 1.0, 0.0, [None, None]),
+    "ch_vector": (1.0, 1.0, 0.01, [None, None]),
+    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
+    "sparsity":  (1.0, 1.0, 0.0, [None, None]),
+    "pair_32px": (1.0, 1.0, 0.0, [None, None]),
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     "batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
-    "batch_spars": (1.0, 1.0, 0.0, [None, None]),    
+    "batch_spars": (1.0, 1.0, 0.0, [None, None]),
 }
 
 _LOSS_NAMES = list(_LOSS_CONFIG.keys())
@@ -805,8 +813,10 @@ def combine_losses_dynamically(
             # 重みとガンマを適用したスカラー損失の算出
             # 計算過程で勾配が必要なため、オリジナルのテンソルから計算を開始
             loss_instance = loss_value_raw.clone()
-            loss_instance = torch.pow(loss_instance + 1e-16, all_gamma) # **= all_gammaと同義だが、NaN対策として必須
-            loss_instance *= all_weight
+            if all_gamma != 1.0:
+                loss_instance = torch.pow(loss_instance + 1e-16, all_gamma) # **= all_gammaと同義だが、NaN対策として必須
+            if all_weight != 1.0:
+                loss_instance *= all_weight
                         
             def reduce_micro_loss_on_lowres(loss, area_img, loss_abs_mean_ema):
                 """
