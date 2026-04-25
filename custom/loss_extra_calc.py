@@ -273,11 +273,11 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     feat_pred   = extract_features(target, num_grid_h, num_grid_w)
     feat_target = extract_features(noise_pred, num_grid_h, num_grid_w)
 
-    scales = 0.5
+    scales = 1.5
     
     if scales != 1.0:
-        feat_pred.mul(scales)
-        feat_target.mul(scales)
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -303,8 +303,8 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
 
     scales = 1.0
     if scales != 1.0:
-        feat_pred.mul(scales)
-        feat_target.mul(scales)
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -352,8 +352,8 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         offset_y = math.sin(angle) * r * step_h
         
         sampling_grid = base_grid.to(_dtype).clone()
-        sampling_grid[..., 0] += offset_x
-        sampling_grid[..., 1] += offset_y
+        sampling_grid[..., 0] = sampling_grid[..., 0] + offset_x
+        sampling_grid[..., 1] = sampling_grid[..., 1] + offset_y
         
         return sampling_grid
 
@@ -414,10 +414,10 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
 
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
 
-    scales = 0.5
+    scales = 1.5
     if scales != 1.0:
-        feat_pred.mul(scales)
-        feat_target.mul(scales)
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -483,10 +483,10 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     feat_target = compare_vector("pair", feat_target)
     # 【補足】 L1-L2という設計原理だけでなく、L1+L2をする作用も存在するが、まあ一致しているに越したことないので、そのままにしておきます（grad過剰累計は気になりますが…）
 
-    scales = 1.0
+    scales = 1.5
     if scales != 1.0:
-        feat_pred.mul(scales)
-        feat_target.mul(scales)
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales
 
     loss = apply_conditional_loss(
         feat_pred,
@@ -558,10 +558,10 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = compare_vector("pair", feat_target)
     feat_pred   = compare_vector("pair", feat_pred)
 
-    scales = 0.5
+    scales = 1.5
     if scales != 1.0:
-        feat_pred.mul(scales)
-        feat_target.mul(scales)
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales
     
     loss = apply_conditional_loss(
         feat_pred,
@@ -1158,7 +1158,7 @@ def combine_losses_dynamically(
             base_grad += add_grad
             
         # 勾配の異常値を丸める
-        base_grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+        base_grad.nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
             
         return base_grad
             
