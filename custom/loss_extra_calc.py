@@ -357,21 +357,6 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         return sampling_grid
 
-    def calc_vector_diff(orig_latents, sampled_latents, mask):
-        # 中心点origに対する、sample点情報を計算
-                
-        # 中心点とサンプリング点をベクトル化        
-        vector = compare_vector("pair", 
-            torch.cat([
-                orig_latents.flatten(2).transpose(1, 2), 
-                sampled_latents.flatten(2).transpose(1, 2)
-            ], dim=2)
-        )
-        
-        valid_indices = mask.flatten(1).unsqueeze(-1).unsqueeze(-1).expand_as(vector)
-        
-        return vector[valid_indices]
-
     def get_ch_flow(target, pred):
         H, W, _, _ = get_image_hw(target)
         B, C, _, _ = target.shape
@@ -386,32 +371,43 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
                 sample_points.append(
                     sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
                 )
-        
-        num_samples = len(sample_points)      
+
+        sample_points_cat = torch.cat(sample_points, dim=0)        
+        num_samples = len(sample_points)
 
         # sample_pointから、値を補間しつつ取得する
         sampled_all = torch.nn.functional.grid_sample(
             torch.cat([target, pred], dim=1).repeat(num_samples, 1, 1, 1).float(), # 統合してgrid_sample呼び出し回数を削減
-            torch.cat(sample_points, dim=0).float(),
+            sample_points_cat.float(),
             mode='bilinear', 
-            padding_mode='border', 
+            padding_mode='border', # 'zeros'の場合、画像端にある被写体が「黒い壁」と隣接と判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
             align_corners=True
         )
-        # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+        
+        sampled_target, sampled_pred = torch.chunk(sampled_all, 2, dim=1)
 
-        sampled_all = sampled_all.view(num_samples, B, C * 2, H, W)
-
-        target_list, pred_list = [], []
-        for i in range(num_samples):
-            mask = (sample_points[i][..., 0].abs() <= 1) & (sample_points[i][..., 1].abs() <= 1)  # 有効領域のみ抽出する（画像の外を対象外とする）
-                
-            # 基準と比較対象との差分を計算
-            sampled_target, sampled_pred = torch.chunk(sampled_all[i], 2, dim=1)
-            target_list.append(calc_vector_diff(target, sampled_target, mask))
-            pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
-            
-        return torch.cat(target_list), torch.cat(pred_list)
-
+        # 中心点とサンプリング点をベクトル化
+        feat_target = compare_vector("pair", 
+            torch.cat([
+                target.repeat(num_samples, 1, 1, 1).flatten(2).transpose(1, 2),  # sampledと同じサイズになるよう複製
+                sampled_target.flatten(2).transpose(1, 2)
+            ], dim=2)
+        )
+        feat_pred = compare_vector("pair", 
+            torch.cat([
+                pred.repeat(num_samples, 1, 1, 1).flatten(2).transpose(1, 2), 
+                sampled_pred.flatten(2).transpose(1, 2)
+            ], dim=2)
+        )
+        
+        # 領域外をクロップ
+        mask = (sample_points_cat[..., 0].abs() <= 1) & (sample_points_cat[..., 1].abs() <= 1)
+        valid_indices = mask.flatten(1)
+        feat_target = feat_target[valid_indices]
+        feat_pred = feat_pred[valid_indices]
+        
+        return feat_target, feat_pred
+        
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
 
     scales = 1.5
