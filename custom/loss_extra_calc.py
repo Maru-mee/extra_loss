@@ -273,7 +273,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     feat_pred   = extract_features(target, num_grid_h, num_grid_w)
     feat_target = extract_features(noise_pred, num_grid_h, num_grid_w)
 
-    scales = 1.5
+    scales = 1.0
     
     if scales != 1.0:
         feat_pred = feat_pred * scales
@@ -497,7 +497,8 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
 def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     地点間の相関（Self-Correlation）による構造損失。
-    1枚の画像内の全座標をペアにして関係性を網羅（総当たり方式）することで、
+    1枚の画像内の全座標をペアにして関係性を評価することで、
+    グリッド間の連続性や立ち位置を知り、
     特定の部位（顔など）への依存を排し、画像全体の空間的な秩序を強制的に学習させる。
     
     scale_px : 元画像サイズスケールでの、１個あたりのgridサイズ
@@ -517,7 +518,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     # ペア番地の作成 -------------------------------------------    
     # ペア間の距離制限を設けることだけが目的。距離制限を考慮しないのならば、不要な行程
 
-    dist_max = 5 # 単位: grid。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか
+    dist_max = 1 # 単位: grid。１以上の自然数。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか。
 
     grid_y, grid_x = torch.meshgrid(
         torch.arange(num_grid_h, device=_device), 
@@ -545,7 +546,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = feat_target.flatten(2).transpose(1, 2)
     feat_pred = feat_pred.flatten(2).transpose(1, 2)
     
-    # (B, HW, 1, C) と (B, 1, HW, C)
+    # (B, HW, 1, C) と (B, 1, HW, C)をペア登録
     feat_target = torch.cat([feat_target[:, i, :], feat_target[:, j, :]], dim=2)
     feat_pred   = torch.cat([feat_pred[:, i, :], feat_pred[:, j, :]], dim=2)
     
@@ -740,13 +741,13 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    "ch_vector": (1.0, 1.0, 0.01, [None, None]),
+    #"ch_vector": (1.0, 1.0, 0.01, [None, None]),
     "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_32px": (1.0, 1.0, 0.0, [None, None]),
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
-    "batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
+    #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
     "batch_spars": (1.0, 1.0, 0.0, [None, None]),
 }
 
@@ -1247,7 +1248,7 @@ def get_loss_all(
         for sp in [128, 64]
     ]
     
-    loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
+    #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
         target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0]
@@ -1267,9 +1268,9 @@ def get_loss_all(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
     )
     
-    loss_batch_ch_vector = calc_loss_batch_relation(
-        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
-    )
+    #loss_batch_ch_vector = calc_loss_batch_relation(
+    #    target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
+    #)
     
     loss_batch_sparsity = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
@@ -1281,7 +1282,7 @@ def get_loss_all(
         loss_base,
         loss_pool_128px,
         loss_pool_64px,
-        loss_ch_vector,
+        #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
         loss_ch_flow_r2,
         loss_sparsity,
         # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
@@ -1290,7 +1291,7 @@ def get_loss_all(
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
-        loss_batch_ch_vector,
+        #loss_batch_ch_vector,
         loss_batch_sparsity,
     ]
     
