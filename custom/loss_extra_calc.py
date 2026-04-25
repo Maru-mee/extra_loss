@@ -273,7 +273,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     feat_pred   = extract_features(target, num_grid_h, num_grid_w)
     feat_target = extract_features(noise_pred, num_grid_h, num_grid_w)
 
-    scales = 1.5
+    scales = 1.0
     
     if scales != 1.0:
         feat_pred = feat_pred * scales
@@ -357,21 +357,6 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
         return sampling_grid
 
-    def calc_vector_diff(orig_latents, sampled_latents, mask):
-        # 中心点origに対する、sample点情報を計算
-                
-        # 中心点とサンプリング点をベクトル化        
-        vector = compare_vector("pair", 
-            torch.cat([
-                orig_latents.flatten(2).transpose(1, 2), 
-                sampled_latents.flatten(2).transpose(1, 2)
-            ], dim=2)
-        )
-        
-        valid_indices = mask.flatten(1).unsqueeze(-1).unsqueeze(-1).expand_as(vector)
-        
-        return vector[valid_indices]
-
     def get_ch_flow(target, pred):
         H, W, _, _ = get_image_hw(target)
         B, C, _, _ = target.shape
@@ -386,32 +371,43 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
                 sample_points.append(
                     sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
                 )
-        
-        num_samples = len(sample_points)      
+
+        sample_points_cat = torch.cat(sample_points, dim=0)        
+        num_samples = len(sample_points)
 
         # sample_pointから、値を補間しつつ取得する
         sampled_all = torch.nn.functional.grid_sample(
             torch.cat([target, pred], dim=1).repeat(num_samples, 1, 1, 1).float(), # 統合してgrid_sample呼び出し回数を削減
-            torch.cat(sample_points, dim=0).float(),
+            sample_points_cat.float(),
             mode='bilinear', 
-            padding_mode='border', 
+            padding_mode='border', # 'zeros'の場合、画像端にある被写体が「黒い壁」と隣接と判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
             align_corners=True
         )
-        # 補足：padding_mode='zeros'の場合、画像端にある被写体が「黒い壁」と隣接していると判定され、そこに実在しない強烈なコントラスト（偽のエッジ）が発生するリスク有り
+        
+        sampled_target, sampled_pred = torch.chunk(sampled_all, 2, dim=1)
 
-        sampled_all = sampled_all.view(num_samples, B, C * 2, H, W)
-
-        target_list, pred_list = [], []
-        for i in range(num_samples):
-            mask = (sample_points[i][..., 0].abs() <= 1) & (sample_points[i][..., 1].abs() <= 1)  # 有効領域のみ抽出する（画像の外を対象外とする）
-                
-            # 基準と比較対象との差分を計算
-            sampled_target, sampled_pred = torch.chunk(sampled_all[i], 2, dim=1)
-            target_list.append(calc_vector_diff(target, sampled_target, mask))
-            pred_list.append(calc_vector_diff(pred, sampled_pred, mask))
-            
-        return torch.cat(target_list), torch.cat(pred_list)
-
+        # 中心点とサンプリング点をベクトル化
+        feat_target = compare_vector("pair", 
+            torch.cat([
+                target.repeat(num_samples, 1, 1, 1).flatten(2).transpose(1, 2),  # sampledと同じサイズになるよう複製
+                sampled_target.flatten(2).transpose(1, 2)
+            ], dim=2)
+        )
+        feat_pred = compare_vector("pair", 
+            torch.cat([
+                pred.repeat(num_samples, 1, 1, 1).flatten(2).transpose(1, 2), 
+                sampled_pred.flatten(2).transpose(1, 2)
+            ], dim=2)
+        )
+        
+        # 領域外をクロップ
+        mask = (sample_points_cat[..., 0].abs() <= 1) & (sample_points_cat[..., 1].abs() <= 1)
+        valid_indices = mask.flatten(1)
+        feat_target = feat_target[valid_indices]
+        feat_pred = feat_pred[valid_indices]
+        
+        return feat_target, feat_pred
+        
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
 
     scales = 1.5
@@ -501,7 +497,8 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
 def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     地点間の相関（Self-Correlation）による構造損失。
-    1枚の画像内の全座標をペアにして関係性を網羅（総当たり方式）することで、
+    1枚の画像内の全座標をペアにして関係性を評価することで、
+    グリッド間の連続性や立ち位置を知り、
     特定の部位（顔など）への依存を排し、画像全体の空間的な秩序を強制的に学習させる。
     
     scale_px : 元画像サイズスケールでの、１個あたりのgridサイズ
@@ -521,7 +518,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     # ペア番地の作成 -------------------------------------------    
     # ペア間の距離制限を設けることだけが目的。距離制限を考慮しないのならば、不要な行程
 
-    dist_max = 5 # 単位: grid。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか
+    dist_max = 1 # 単位: grid。１以上の自然数。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか。
 
     grid_y, grid_x = torch.meshgrid(
         torch.arange(num_grid_h, device=_device), 
@@ -549,7 +546,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
     feat_target = feat_target.flatten(2).transpose(1, 2)
     feat_pred = feat_pred.flatten(2).transpose(1, 2)
     
-    # (B, HW, 1, C) と (B, 1, HW, C)
+    # (B, HW, 1, C) と (B, 1, HW, C)をペア登録
     feat_target = torch.cat([feat_target[:, i, :], feat_target[:, j, :]], dim=2)
     feat_pred   = torch.cat([feat_pred[:, i, :], feat_pred[:, j, :]], dim=2)
     
@@ -744,13 +741,13 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    "ch_vector": (1.0, 1.0, 0.01, [None, None]),
+    #"ch_vector": (1.0, 1.0, 0.01, [None, None]),
     "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_32px": (1.0, 1.0, 0.0, [None, None]),
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
-    "batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
+    #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
     "batch_spars": (1.0, 1.0, 0.0, [None, None]),
 }
 
@@ -1251,7 +1248,7 @@ def get_loss_all(
         for sp in [128, 64]
     ]
     
-    loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
+    #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow_r2 = calc_loss_ch_flow_2(
         target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0]
@@ -1271,9 +1268,9 @@ def get_loss_all(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
     )
     
-    loss_batch_ch_vector = calc_loss_batch_relation(
-        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
-    )
+    #loss_batch_ch_vector = calc_loss_batch_relation(
+    #    target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
+    #)
     
     loss_batch_sparsity = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
@@ -1285,7 +1282,7 @@ def get_loss_all(
         loss_base,
         loss_pool_128px,
         loss_pool_64px,
-        loss_ch_vector,
+        #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
         loss_ch_flow_r2,
         loss_sparsity,
         # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
@@ -1294,7 +1291,7 @@ def get_loss_all(
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
-        loss_batch_ch_vector,
+        #loss_batch_ch_vector,
         loss_batch_sparsity,
     ]
     
