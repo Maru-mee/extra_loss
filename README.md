@@ -1,4 +1,5 @@
 
+
 各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
 sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
@@ -33,7 +34,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/f46d9530-9279-48fa-99fa-07d41391eede" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/c46e15e8-31ff-481b-91a1-d7ee7fd9e0d2" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
   * full_body, ポーズ, 画風が、早期に再現及び維持できています。
@@ -43,7 +44,7 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
   * 上記サンプル画像における学習改善の影響が、データセット全体に対する認識力改善に寄与します。
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
-  * 【参考】 図はloss_extra_calc_v0.14を使用
+  * 【参考】 図はloss_extra_calc_v0.16を使用
 <details><summary>キャプション</summary>
 zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, open mouth, very long hair, weapon, polearm, short kimono, full body, white_background, standing on one leg, dark green hair, looking at viewer, standing, sandals, simple background, sash, tasuki, :d, obi, naginata, geta --d 341 --s 30 --w 1024 --h 1024 --l 4.0
 </details>
@@ -112,7 +113,6 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
   </details>
 * learning rateは既存設定を流用可能です。
   * これまで認知できなかったgradが発生するため、少しだけ調整が必要かもしれません。
-  * 目安として、以前よりも形状認識がしやすくなっているlossですので、小物や物体が登場しない＝認識できなかったわけではなくて、Lrが高過ぎて塗りつぶされている、という構図がわかりやすくなっています。
 * optimizerのbeta値は既存設定を流用可能です。
 * 下記はおそらく共存可能ですが、本機能を活かす上でなんらかのブレーキが作用する可能性があります
   * debiased_estimation
