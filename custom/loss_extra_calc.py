@@ -718,8 +718,8 @@ def calc_loss_batch_relation(
                 boost_common = 1.0
                 scales = (boost * boost_common) / norm
                 if scales != 1.0:                    
-                    feat_pred.mul(scales)
-                    feat_target.mul(scales)
+                    feat_pred = feat_pred * scales
+                    feat_target = feat_target * scales
                     
                 loss = apply_conditional_loss(
                     feat_pred,
