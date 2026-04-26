@@ -586,7 +586,6 @@ def calc_loss_batch_relation(
     
     batch_size = target.shape[0]
     
-    total_loss_relation = torch.zeros(batch_size, device=_device, dtype=_dtype)
     is_execute_flag = True
     
     if batch_size < 2:
@@ -619,8 +618,7 @@ def calc_loss_batch_relation(
             
             features = [x_flat]
             
-            boost   = 2.0
-            norm    = area_latents
+            boost   = 1.0
             
         elif mode=="pool":
             # 各領域のベクトルの平均値を比較する
@@ -637,8 +635,7 @@ def calc_loss_batch_relation(
                 pool_x.flatten(1), 
             ]
             
-            boost   = 0.5
-            norm    = num_grid_h * num_grid_w
+            boost   = 1.0
             
         elif mode=="ch_vector":
             # loss_ch_vectorと類似機能
@@ -648,8 +645,7 @@ def calc_loss_batch_relation(
 
             features = [x_vector]
             
-            boost   = 2.0
-            norm    = area_latents
+            boost   = 1.0
 
         elif mode=="ch_sparsity":
             # 設計思想はloss_ch_sparsityと同等
@@ -670,8 +666,7 @@ def calc_loss_batch_relation(
                 x_sparsity.flatten(1),
             ]
             
-            boost   = 2.0
-            norm    = area_latents
+            boost   = 1.0
             
         elif mode=="others": 
             # 基本的には使わない、過去の統計値
@@ -686,9 +681,10 @@ def calc_loss_batch_relation(
                 #std,
             ])
             boost = 1.0
-            norm    = area_latents
             
-        return torch.cat(features, dim=1), boost, norm        
+        return torch.cat(features, dim=1), boost      
+    
+    total_losses_list = []
     
     # snrが同等の全batchペア走査
     for i in range(batch_size):
@@ -701,8 +697,8 @@ def calc_loss_batch_relation(
                 #print_storage("keep", f"calc loss_batch_relation\tbatch{i} vs batch{j}")
                 
                 # 特徴抽出と標準化を一括処理
-                feat_pred, boost, norm  = extract_features(noise_pred[indices], mode)
-                feat_target, _, norm    = extract_features(target[indices], mode)
+                feat_pred, boost  = extract_features(noise_pred[indices], mode)
+                feat_target, _    = extract_features(target[indices], mode)
 
                 # batch方向のベクトル化
                 # 【参考】 以前は、２つのbatchのペアのL1距離で計算していたが、
@@ -712,9 +708,8 @@ def calc_loss_batch_relation(
                                 
                 # 補正
                 # boost : 学習効果を調整する効果
-                # norm  : 要素数などによる正規化
                 boost_common = 1.0
-                scales = (boost * boost_common) / norm
+                scales = boost * boost_common
                 if scales != 1.0:                    
                     feat_pred = feat_pred * scales
                     feat_target = feat_target * scales
@@ -727,9 +722,12 @@ def calc_loss_batch_relation(
                     huber_c=huber_c
                 )
                 
-                total_loss_relation += loss.sum()
+                total_losses_list.append(loss.flatten())
+                
+    if not total_losses_list:
+        return torch.zeros(1, device=_device, dtype=_dtype)         
 
-    return total_loss_relation
+    return torch.cat(total_losses_list)
     
 #-----------------------------------------
 
