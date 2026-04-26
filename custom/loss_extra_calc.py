@@ -718,7 +718,7 @@ def calc_loss_batch_relation(
                     feat_pred,
                     feat_target,
                     reduction="none",
-                    loss_type="l2",
+                    loss_type="l2", # batch毎にsnrが異なるため、loss_type=smooth_l1, huber_schedule=snrの組合せだけは絶対に回避するべき
                     huber_c=huber_c
                 )
                 
