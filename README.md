@@ -100,17 +100,8 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
 
 ## 使用方法
 通常通り学習を実施します。
-* loss_typeは任意ですが、L2単体は避けた方が良いでしょう。推奨はL1かhuber smooth_L1
-  <details><summary>理由</summary>
-   
-  * L2単体だと、L2のハズレ値を学ぶという特性に加えて、loss_extra_calcによる詳細を学ぶという特性が相乗効果を生み、良い結果にはなりにくいです。
-  * また、ただでさえ多数のloss(grad)登場により、loss-weight曲面が複雑になっているのに対して、さらにL2にしてしまうとlossの山谷がより急峻になり、局所解からの脱出が極めて困難になります。
-  * そうならないように山谷が急にならないよう配慮した設計はしているものの、限度があります。
-  * 別の目線では、L2にしなくても、多数のlossによってウェイトをガッチリホールドできているとも言えます。
-  * 代替案として、smooth_l1及びc<0.2程度でもいいでしょう。
-  * 筆者の検証環境は、L1またはsmooth_l1, snr , c=0.01です。
     
-  </details>
+
 * learning rateは既存設定を流用可能です。
   * これまで認知できなかったgradが発生するため、少しだけ調整が必要かもしれません。
 * optimizerのbeta値は既存設定を流用可能です。
@@ -118,7 +109,14 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
   * debiased_estimation
   * min_snr_gamma
   * multires_noise_iteration
-   
+  * loss_type。L2だけは避けたほうがいいでしょう
+  <details><summary>理由</summary>
+   * L2単体だと、L2のハズレ値を学ぶという特性に加えて、loss_extra_calcによる詳細を学ぶという特性が相乗効果を生み、良い結果にはなりにくいです。
+   * ただでさえ多数のloss(grad)登場により、loss-weight曲面が複雑になっているのに対して、さらにL2にしてしまうとlossの山谷がより急峻になり、局所解からの脱出が極めて困難になります。
+   * そうならないように山谷が急にならないよう配慮した設計はしているものの、限度があります。
+   * 別の目線では、L2にしなくても、多数のlossによってウェイトをガッチリホールドできているとも言えます。
+  </details>  
+  
 ## 補足
 * もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
   * 学習進捗に合わせて機能OFFすることもご検討ください
