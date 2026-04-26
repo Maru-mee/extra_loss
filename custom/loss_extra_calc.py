@@ -284,7 +284,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
         feat_pred,
         feat_target,
         reduction="none",
-        loss_type=args.loss_type,
+        loss_type="l2",
         huber_c=huber_c
     )
     
@@ -420,7 +420,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         feat_pred,
         feat_target,
         reduction="none", 
-        loss_type=args.loss_type, 
+        loss_type="l2",
         huber_c=huber_c
     )
     
@@ -565,7 +565,7 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
         feat_pred,
         feat_target,
         reduction="none", 
-        loss_type=args.loss_type,
+        loss_type="l2",
         huber_c=huber_c
     )  
             
@@ -723,7 +723,7 @@ def calc_loss_batch_relation(
                     feat_pred,
                     feat_target,
                     reduction="none",
-                    loss_type=args.loss_type,
+                    loss_type="l2",
                     huber_c=huber_c
                 )
                 
