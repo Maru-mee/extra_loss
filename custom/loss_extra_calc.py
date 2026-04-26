@@ -181,8 +181,8 @@ def compare_vector(mode, x):
         v1, v2 = torch.chunk(x, chunks=2, dim=2) # チャンネル要素を2分割してv1, v2を復元
     
     # ユニーク化。設計意図は関数末尾を参照
-    v_diff = (v1 - v2) * 0.5
-    v_sum  = (v1 + v2) * 0.5
+    v_diff = (v1 - v2) * 0.8
+    v_sum  = (v1 + v2) * 0.2
 
     if mode == "batch":        
         result = torch.stack([v_sum, v_diff], dim=1).squeeze(0)
@@ -200,6 +200,7 @@ def compare_vector(mode, x):
      ・ v1及びv2両方とも小さい場合のアンダーフロー対策
      ・ v1及びv2両方とも大きすぎる場合の勾配爆発対策（というより、lossのスケール統一）
      ・ v1とv2ベクトルが逆転していた場合に、diffが同値にならないようにするための予防措置 
+     ・ v_sumが大きすぎると、v_diffによるエッジが利かずにぼんやりする
      
     """
     
