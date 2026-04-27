@@ -571,6 +571,47 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
             
     return loss
     
+def calc_loss_outside(target, noise_pred, args, huber_c):
+    """
+    画像の外縁部ほど重みを強くして評価する損失。
+    loss_ch_flowによって発生しがちな、周囲のボーダーを評価する。
+    通常の学習においても中央が優先されがちなので、外側から学習を強化するという意味でも有効
+    背景の学習にも有効
+    """    
+    B, C, H, W = target.shape
+
+    # 座標グリッドの作成 (-1.0 ～ 1.0)
+    grid_y, grid_x = torch.meshgrid(
+        torch.linspace(-1, 1, H, device=_device, dtype=_dtype),
+        torch.linspace(-1, 1, W, device=_device, dtype=_dtype),
+        indexing='ij'
+    )
+
+    # 中心からの距離 d (L∞ノルム)
+    d = torch.max(grid_x.abs(), grid_y.abs())
+    
+    # Cosine分布によるウェイトマップ (中心 0.0 ～ 端 2.0)
+    # 1 - cos(d * pi/2) により、端に向かって加速度的に重みが増す
+    weight = ((1 - torch.cos(d * (math.pi / 2))) * 2.0).view(1, 1, H, W).expand(B, C, H, W)
+
+    feat_target = target * weight
+    feat_pred   = noise_pred * weight
+    
+    scales = 1.0
+    if scales != 1.0:
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales    
+
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
+        reduction="none",
+        loss_type=args.loss_type,
+        huber_c=huber_c
+    )
+
+    return loss    
+    
 def calc_loss_batch_relation(
     target, noise_pred, args, huber_c, area_latents, is_above_limit, mode, scale_px=1024,
 ):
@@ -744,6 +785,7 @@ _LOSS_CONFIG = {
     "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_32px": (1.0, 1.0, 0.0, [None, None]),
+    "outside": (1.0, 1.0, 0.0, [None, None]),
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1259,6 +1301,8 @@ def get_loss_all(
         target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=32
     )
     
+    loss_outside = calc_loss_outside(target_mod, pred_mod, args, huber_c)
+    
     loss_batch_pool_64px = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", scale_px=64
     )
@@ -1287,6 +1331,7 @@ def get_loss_all(
         # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
         # loss_pair_corr_64px,  # 廃止。同上
         loss_pair_corr_32px,
+        loss_outside,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
