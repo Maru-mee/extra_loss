@@ -571,28 +571,108 @@ def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit
             
     return loss
     
-def calc_loss_outside(target, noise_pred, args, huber_c):
+def calc_loss_focus(mode, target, noise_pred, args, huber_c):
     """
-    画像の外縁部ほど重みを強くして評価する損失。
-    loss_ch_flowによって発生しがちな、周囲のボーダーを評価する。
-    通常の学習においても中央が優先されがちなので、外側から学習を強化するという意味でも有効
-    背景の学習にも有効
-    """    
-    B, C, H, W = target.shape
-
-    # 座標グリッドの作成 (-1.0 ～ 1.0)
-    grid_y, grid_x = torch.meshgrid(
-        torch.linspace(-1, 1, H, device=_device, dtype=_dtype),
-        torch.linspace(-1, 1, W, device=_device, dtype=_dtype),
-        indexing='ij'
-    )
-
-    # 中心からの距離 d (L∞ノルム)
-    d = torch.max(grid_x.abs(), grid_y.abs())
+    通常のlossよりも、一部のエリアの重みを強くして評価する損失
     
-    # Cosine分布によるウェイトマップ (中心 0.0 ～ 端 2.0)
-    # 1 - cos(d * pi/2) により、端に向かって加速度的に重みが増す
-    weight = ((1 - torch.cos(d * (math.pi / 2))) * 2.0).view(1, 1, H, W).expand(B, C, H, W)
+    mode = outside: 画像の外側のウェイトを強める
+        ・通常の学習では、画像中央に注目が向きやすくなり、外側が疎かになりやすい
+         たとえば、画像周囲にある小物タグが全く学習できない状況が発生し、
+         タグと画像の誤った結びつきが発生する
+         そのうえ、loss_ch_flowの周囲maskによって、周囲のボーダーが発生しやすくなる
+        ・このoutsideモードでは、外側から学習を強化し、画像全体のクオリティを高める
+        ・効果として、背景の書込み、小物の正確さ、外側の欠落・ボケの解消、外側-中央からの両端支持的な境界条件ライクな連続性ある学習
+     
+    mode = high_loss_area: lossが高いエリアのみを対象とする
+        ・lossが高いところ以外を検査対象外として、gradの通り道を絞る
+         ディティールの精度を上げたい・・・が、研究中であり、十分な成果はでていない
+    """
+    B, C, H, W = target.shape
+    
+    def get_weight_outside():
+        """
+        画像の外縁部を重視するウェイトマップの作成
+        """
+        
+        grid_y, grid_x = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=_device, dtype=_dtype),
+            torch.linspace(-1, 1, W, device=_device, dtype=_dtype),
+            indexing='ij'
+        )
+        
+        d = torch.max(grid_x.abs(), grid_y.abs()) # 中心からの距離
+        
+        weight = ((1 - torch.cos(d * (math.pi / 2))) * 2.0).view(1, 1, H, W).expand(B, C, H, W) # 中心 0.0 ～ 端 2.0 のCosine分布
+        
+        return weight
+
+    def get_weight_high_loss(cropped_size):
+        """
+        lossが大きい正方形領域１つだけをcropする
+        領域を段階的に絞り込んでいくことで、浮島のようなメインではない不連続物体への適合を防ぐ
+        """
+        
+        detect_sizes = [min(min(H, W), s // 8) 
+            for s in [
+                cropped_size * 4, # = 2^2
+                cropped_size * 2, 
+                cropped_size
+            ]
+        ]
+        if H < detect_sizes[-1] or W < detect_sizes[-1]:
+            return None
+        
+        # Initialize
+        loss_heatmap = torch.abs(target - noise_pred).mean(dim=1, keepdim=True)
+        top_left_y = torch.zeros(B, dtype=torch.long, device=_device)
+        top_left_x = torch.zeros(B, dtype=torch.long, device=_device)
+        window_h, window_w = H, W
+
+        for detect_size in detect_sizes:
+            for i in range(B):
+                
+                # ヒートマップから、現在の探索対象となる範囲を窓状に切り出し
+                search_window = loss_heatmap[
+                    i : i + 1,                                 # B
+                    :,                                         # C
+                    top_left_y[i] : top_left_y[i] + window_h,        # H
+                    top_left_x[i] : top_left_x[i] + window_w         # W
+                ]
+                
+                kernel = torch.ones(
+                    (1, 1, detect_size, detect_size), 
+                    device=_device, 
+                    dtype=_dtype
+                )
+
+                # lossが最大のエリアの座標を取得             
+                loss_sum_map = torch.nn.functional.conv2d(search_window, kernel)
+                top_loss_area = loss_sum_map.view(1, -1).argmax(dim=1).item()
+                top_left_y[i] += top_loss_area // loss_sum_map.size(-1)
+                top_left_x[i] += top_loss_area % loss_sum_mapp.size(-1)
+                
+            window_h, window_w = detect_size, detect_size
+
+        # 特定領域を1.0、他を0.0とするマスクを生成
+        weight = torch.zeros((B, 1, H, W), device=_device, dtype=_dtype)
+        for i in range(B):
+            weight[
+                i, 
+                0, 
+                top_left_y[i]:top_left_y[i]+window_h, 
+                top_left_x[i]:top_left_x[i]+window_w
+            ] = 1.0
+            
+        return weight.expand(B, C, H, W)
+
+    if mode == "outside":
+        weight = get_weight_outside()
+    elif mode == "high_loss_area":
+        weight = get_weight_high_loss(cropped_size=128)
+        if weight is None:
+            return torch.zeros(1, device=_device, dtype=_dtype)
+    else:
+        input("WARNING： loss_focus:mode未指定")
 
     feat_target = target * weight
     feat_pred   = noise_pred * weight
@@ -779,13 +859,14 @@ _LOSS_CONFIG = {
     # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
+    "outside": (1.0, 1.0, 0.0, [None, None]),
+    # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
     "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]),
     "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
     #"ch_vector": (1.0, 1.0, 0.01, [None, None]),
     "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     "pair_32px": (1.0, 1.0, 0.0, [None, None]),
-    "outside": (1.0, 1.0, 0.0, [None, None]),
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1281,6 +1362,9 @@ def get_loss_all(
     # いくら上記を満たそうとも、ピクセル比較系lossが多すぎると、過適合になる。そのため、一部のピクセル系lossは妥協して適用させるべき
     #target_gaus    = filtering_gaussian(target_mod)
     #pred_gaus      = filtering_gaussian(pred_mod)  
+
+    loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
+    #loss_high_loss_area = calc_loss_focus("high_loss_area", target_mod, pred_mod, args, huber_c)    
     
     loss_pool_128px, loss_pool_64px = [
         calc_loss_pool(
@@ -1300,8 +1384,6 @@ def get_loss_all(
     loss_pair_corr_32px = calc_loss_pair_correlation(
         target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=32
     )
-    
-    loss_outside = calc_loss_outside(target_mod, pred_mod, args, huber_c)
     
     loss_batch_pool_64px = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", scale_px=64
@@ -1323,6 +1405,8 @@ def get_loss_all(
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
+        loss_outside,
+        #loss_high_loss_area, # 開発中
         loss_pool_128px,
         loss_pool_64px,
         #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
@@ -1331,7 +1415,6 @@ def get_loss_all(
         # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
         # loss_pair_corr_64px,  # 廃止。同上
         loss_pair_corr_32px,
-        loss_outside,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
