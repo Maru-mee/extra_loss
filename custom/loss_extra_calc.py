@@ -651,7 +651,7 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
                 loss_sum_map = torch.nn.functional.conv2d(search_window, kernel)
                 top_loss_area = loss_sum_map.view(1, -1).argmax(dim=1).item()
                 top_left_y[i] += top_loss_area // loss_sum_map.size(-1)
-                top_left_x[i] += top_loss_area % loss_sum_mapp.size(-1)
+                top_left_x[i] += top_loss_area % loss_sum_map.size(-1)
                 
             window_h, window_w = detect_size, detect_size
 
