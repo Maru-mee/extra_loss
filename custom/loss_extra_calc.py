@@ -411,7 +411,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         
     feat_target, feat_pred = get_ch_flow(target, noise_pred)
 
-    scales = 1.5
+    scales = 1.0
     if scales != 1.0:
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
@@ -602,7 +602,9 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
         
         d = torch.max(grid_x.abs(), grid_y.abs()) # 中心からの距離
         
-        weight = ((1 - torch.cos(d * (math.pi / 2))) * 2.0).view(1, 1, H, W).expand(B, C, H, W) # 中心 0.0 ～ 端 2.0 のCosine分布
+        # 中心:0.0, 端:max_weightのCosine分布
+        max_weight = 1.5
+        weight = ((1 - torch.cos(d * (math.pi / 2))) * max_weight).view(1, 1, H, W).expand(B, C, H, W) 
         
         return weight
 
@@ -829,7 +831,7 @@ def calc_loss_batch_relation(
                                 
                 # 補正
                 # boost : 学習効果を調整する効果
-                boost_common = 1.0
+                boost_common = 0.5
                 scales = boost * boost_common
                 if scales != 1.0:                    
                     feat_pred = feat_pred * scales
