@@ -173,7 +173,7 @@ def compare_vector(mode, x):
     # xにおける、ベクトル２ペアの相関を特徴量化する関数
     
     # mode = batch バッチ方向の比較.B=2（となるように、loss_batchは設計している）
-    # mode = pair loss_pair専用のペア間の比較. x: (B, N_pairs, C)という、N_pairチャンネル方向にペアをスタックした1つのテンソル
+    # mode = pair 2要素のペア間の比較. x: (B, N_pairs, C)という、N_pairチャンネル方向にペアをスタックした1つのテンソル
 
     if mode == "batch":
         v1, v2 = torch.chunk(x, chunks=2, dim=0) # バッチ要素を2分割
@@ -296,6 +296,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     色相や概念の向きを評価
     pixel perfectやドット検出（多少ではあるがエッジ検出）の効果があり、新しい画像要素を発見するのに特に有効。
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
+    特に、高timestepのノイズは、このloss以外に評価できるlossはほとんどなく、他のloss由来のアーティファクトを防ぐ効果がある
     """
 
     feat_target   = get_ch_vector(target)
@@ -495,81 +496,7 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
 
     return loss    
 
-def calc_loss_pair_correlation(target, noise_pred, args, huber_c, is_above_limit, scale_px):
-    """
-    地点間の相関（Self-Correlation）による構造損失。
-    1枚の画像内の全座標をペアにして関係性を評価することで、
-    グリッド間の連続性や立ち位置を知り、
-    特定の部位（顔など）への依存を排し、画像全体の空間的な秩序を強制的に学習させる。
-    
-    scale_px : 元画像サイズスケールでの、１個あたりのgridサイズ
-    poolの分割数
-    """
-    
-    # サイズから分割数決定
-    H, W, _, _ = get_image_hw(target)
-    scale_latents = scale_px / 8 # px → latents
-    num_grid_h = int(max(1, H // scale_latents))
-    num_grid_w = int(max(1, W // scale_latents))
-    
-    # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
-    if num_grid_h < 4 or num_grid_w < 4:
-        return torch.zeros(1, device=_device, dtype=_dtype)
-        
-    # ペア番地の作成 -------------------------------------------    
-    # ペア間の距離制限を設けることだけが目的。距離制限を考慮しないのならば、不要な行程
 
-    dist_max = 1 # 単位: grid。１以上の自然数。基準となるグリッドに対して、半径方向何gridまでの正方形領域をペア対象とするか。
-
-    grid_y, grid_x = torch.meshgrid(
-        torch.arange(num_grid_h, device=_device), 
-        torch.arange(num_grid_w, device=_device), 
-        indexing='ij'
-    )
-    coords = torch.stack(
-        [grid_y.flatten(), grid_x.flatten()], 
-        dim=1
-    )
-
-    num_locations = num_grid_h * num_grid_w
-    indices = torch.triu_indices(num_locations, num_locations, offset=1, device=_device)
-    i, j = indices[0], indices[1]
-    dist = (coords[i] - coords[j]).abs().sum(-1)
-    i, j = i[dist <= dist_max], j[dist <= dist_max]
-        
-    # -------------------------------------------------------]
-    
-    # 空間情報の抽出
-    feat_target = adaptive_avg_pool2d_for_latents(target.float(), (num_grid_h, num_grid_w))
-    feat_pred   = adaptive_avg_pool2d_for_latents(noise_pred.float(), (num_grid_h, num_grid_w))
-    
-    # 特徴ベクトル化 (B, HW, C)
-    feat_target = feat_target.flatten(2).transpose(1, 2)
-    feat_pred = feat_pred.flatten(2).transpose(1, 2)
-    
-    # (B, HW, 1, C) と (B, 1, HW, C)をペア登録
-    feat_target = torch.cat([feat_target[:, i, :], feat_target[:, j, :]], dim=2)
-    feat_pred   = torch.cat([feat_pred[:, i, :], feat_pred[:, j, :]], dim=2)
-    
-    # ベクトル化
-    # これによって、loss_type=l1時の、grad_absのmaxとmeanが等しくなってしまう問題を解消
-    feat_target = compare_vector("pair", feat_target)
-    feat_pred   = compare_vector("pair", feat_pred)
-
-    scales = 1.5
-    if scales != 1.0:
-        feat_pred = feat_pred * scales
-        feat_target = feat_target * scales
-    
-    loss = apply_conditional_loss(
-        feat_pred,
-        feat_target,
-        reduction="none", 
-        loss_type="l2",
-        huber_c=huber_c
-    )  
-            
-    return loss
     
 def calc_loss_focus(mode, target, noise_pred, args, huber_c):
     """
@@ -863,12 +790,11 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "outside": (1.0, 1.0, 0.0, [None, None]),
     # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
-    "pool_128px": (1.0, 1.0, 0.0, ["pool", "base"]),
-    "pool_64px": (1.0, 1.0, 0.0, ["pool", "sub"]),
-    #"ch_vector": (1.0, 1.0, 0.01, [None, None]),
-    "ch_flow_r2":  (1.0, 1.0, 0.0, [None, None]),
-    "sparsity":  (1.0, 1.0, 0.0, [None, None]),
-    "pair_32px": (1.0, 1.0, 0.0, [None, None]),
+    "pool_51px": (1.0, 1.0, 0.0, ["pool", "base"]),
+    "pool_32px": (1.0, 1.0, 0.0, ["pool", "sub"]),
+    #"ch_vector": (1.0, 1.0, 0.0, [None, None]),
+    "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
+    "sparsity":  (1.0, 1.0, 0.0, [None, None]),   
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1368,24 +1294,20 @@ def get_loss_all(
     loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
     #loss_high_loss_area = calc_loss_focus("high_loss_area", target_mod, pred_mod, args, huber_c)    
     
-    loss_pool_128px, loss_pool_64px = [
+    loss_pool_51px, loss_pool_32px = [
         calc_loss_pool(
             target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=sp
         )
-        for sp in [128, 64]
+        for sp in [51, 32]  # 32pxと独立性が強く、計算コストの比較的低い値=51px
     ]
     
     #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
-    loss_ch_flow_r2 = calc_loss_ch_flow_2(
-        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0]
+    loss_ch_flow = calc_loss_ch_flow_2(
+        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0, 5.0, 11.0]
     )
     
-    loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)
-    
-    loss_pair_corr_32px = calc_loss_pair_correlation(
-        target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=32
-    )
+    loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)  
     
     loss_batch_pool_64px = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", scale_px=64
@@ -1401,7 +1323,7 @@ def get_loss_all(
     
     loss_batch_sparsity = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
-    )    
+    )
    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
@@ -1409,14 +1331,11 @@ def get_loss_all(
         loss_base,
         loss_outside,
         #loss_high_loss_area, # 開発中
-        loss_pool_128px,
-        loss_pool_64px,
+        loss_pool_51px,
+        loss_pool_32px,
         #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
-        loss_ch_flow_r2,
+        loss_ch_flow,
         loss_sparsity,
-        # loss_pair_corr_128px, # 廃止。平均化性能に優れているが、ディティール消える・新要素の邪魔をする・grad重複のデメリットの方が大きい。管理が難しくなるので使わない
-        # loss_pair_corr_64px,  # 廃止。同上
-        loss_pair_corr_32px,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
