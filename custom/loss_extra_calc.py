@@ -793,8 +793,8 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "outside": (1.0, 1.0, 0.0, [None, None]),
     # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
-    "pool_51px": (1.0, 1.0, 0.0, ["pool", "base"]),
-    "pool_32px": (1.0, 1.0, 0.0, ["pool", "sub"]),
+    "pool_51px": (1.0, 1.0, 0.0, [None, None]),
+    "pool_32px": (1.0, 1.0, 0.0, [None, None]),
     #"ch_vector": (1.0, 1.0, 0.0, [None, None]),
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),   
