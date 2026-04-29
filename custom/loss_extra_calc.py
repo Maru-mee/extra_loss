@@ -319,13 +319,13 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     return loss
 
 
-def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searching_radius=2.0):
+def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searching_radius=[2.0, 5.0]):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
     loss_ch_vectorで低下するピクセル間の連続性（ケロイドなどの学習の副産物）を抑制する
     
-    searching_radius :検索半径[px] 相当距離であって、pxそのものではない。単一の値か、リスト（複数の半径）かを指定
+    searching_radius :検索半径[px] 相当距離であって、pxそのものではない。リストの半径範囲を指定
     """
 
     eps = 1e-10
@@ -334,9 +334,6 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         # 解像度が低い場合、計算困難な境界影響が強くなり、境界クロップが発生しやすくなる
         return torch.zeros(1, device=_device, dtype=_dtype)
         
-    if not isinstance(searching_radius, list):
-        searching_radius = [searching_radius]  
-
     def create_base_grid(B, H, W):
         # 基準となる座標の網を作る
         
@@ -365,17 +362,23 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         base_grid = create_base_grid(B, H, W)
         
         step_h, step_w = 2.0 / (H - 1), 2.0 / (W - 1)
-        angles = torch.linspace(0, 2 * math.pi, 9, device=_device)[:-1]
-                
+        
         sample_points = []
-        for r in searching_radius:
-            for angle in angles:
-                sample_points.append(
-                    sample_by_angle(target, base_grid, angle.item(), r, step_h, step_w)
-                )
+        
+        # 黄金角に螺旋状のサンプリング
+        num_samples = 24
+        min_r = min(searching_radius)
+        max_r = max(searching_radius)
+        
+        for i in range(num_samples):
+            r = min_r + (max_r - min_r) * math.sqrt(i / (num_samples - 1))
+            angle = i * math.pi * (3 - 5**0.5) 
+            
+            sample_points.append(
+                sample_by_angle(target, base_grid, angle, r, step_h, step_w)
+            )
 
-        sample_points_cat = torch.cat(sample_points, dim=0)        
-        num_samples = len(sample_points)
+        sample_points_cat = torch.cat(sample_points, dim=0)
 
         # sample_pointから、値を補間しつつ取得する
         sampled_all = torch.nn.functional.grid_sample(
@@ -1304,7 +1307,7 @@ def get_loss_all(
     #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow = calc_loss_ch_flow_2(
-        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [2.0, 5.0, 11.0]
+        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [0.5, 4.0]
     )
     
     loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)  
