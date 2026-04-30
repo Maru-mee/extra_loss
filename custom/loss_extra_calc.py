@@ -279,16 +279,24 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     if scales != 1.0:
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
-    
-    loss = apply_conditional_loss(
-        feat_pred,
-        feat_target,
+     
+    # MTL実施したいので、この段階で複素数から分離 
+    loss_real = apply_conditional_loss(
+        feat_pred.real.float(), 
+        feat_target.real.float(),
+        reduction="none",
+        loss_type="l2",
+        huber_c=huber_c
+    )
+    loss_imag = apply_conditional_loss(
+        feat_pred.imag.float(), 
+        feat_target.imag.float(),
         reduction="none",
         loss_type="l2",
         huber_c=huber_c
     )
     
-    return loss
+    return loss_real, loss_imag
     
 def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     """
@@ -793,8 +801,10 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     "outside": (1.0, 1.0, 0.0, [None, None]),
     # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
-    "pool_51px": (1.0, 1.0, 0.0, [None, None]),
-    "pool_32px": (1.0, 1.0, 0.0, [None, None]),
+    "pool_51px_me": (1.0, 1.0, 0.0, [None, None]),
+    "pool_32px_me": (1.0, 1.0, 0.0, [None, None]),
+    "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
+    "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
     #"ch_vector": (1.0, 1.0, 0.0, [None, None]),
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),   
@@ -1297,12 +1307,15 @@ def get_loss_all(
     loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
     #loss_high_loss_area = calc_loss_focus("high_loss_area", target_mod, pred_mod, args, huber_c)    
     
-    loss_pool_51px, loss_pool_32px = [
+    pool_results = [
         calc_loss_pool(
             target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=sp
         )
         for sp in [51, 32]  # 32pxと独立性が強く、計算コストの比較的低い値=51px
     ]
+
+    loss_pool_51px_mean, loss_pool_51px_var = pool_results[0]
+    loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
     
     #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
@@ -1334,8 +1347,10 @@ def get_loss_all(
         loss_base,
         loss_outside,
         #loss_high_loss_area, # 開発中
-        loss_pool_51px,
-        loss_pool_32px,
+        loss_pool_51px_mean,
+        loss_pool_32px_mean,
+        loss_pool_51px_var,        
+        loss_pool_32px_var,        
         #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
         loss_ch_flow,
         loss_sparsity,
