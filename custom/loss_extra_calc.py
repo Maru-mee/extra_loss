@@ -296,6 +296,13 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
         huber_c=huber_c
     )
     
+    # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない
+    snr_weight = _current_snr_weight.view(-1, 1)
+    snr_weight = torch.where(snr_weight < 0.8, snr_weight, torch.zeros_like(snr_weight))
+    
+    loss_real = loss_real * snr_weight
+    loss_imag = loss_imag * snr_weight
+    
     return loss_real, loss_imag
     
 def calc_loss_ch_vector(target, noise_pred, args, huber_c):
