@@ -256,8 +256,9 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     num_grid_w = int(max(1, W // scale_latents))
     
     # 4x4を確保できないならば精度不足。120通りのペア数を保証することで多様性を確保
-    if num_grid_h < 4 or num_grid_w < 4:
-        return torch.zeros(1, device=_device, dtype=_dtype)
+    if num_grid_h < 4 or num_grid_w < 4:       
+        zero_tensor = torch.zeros(1, device=_device, dtype=_dtype)
+        return zero_tensor, zero_tensor
 
     def extract_features(x, num_grid_h, num_grid_w):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
