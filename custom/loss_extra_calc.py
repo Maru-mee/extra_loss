@@ -492,15 +492,15 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     
     # スケールを切り落とし方向だけにすることで、ピーキーな性質を無くす。このlossは暴君であり、オーバーシュートが大きいため、normalizeは効果大
     # この結果、loss_baseに対する直交成分になりやすくなる
-    # 注. compare_vectorがスケールの大きさを感知できる、なんらかの手段が必須。
-    feat_pred   = torch.nn.functional.normalize(feat_pred,   p=2, dim=2, eps=eps)
-    feat_target = torch.nn.functional.normalize(feat_target, p=2, dim=2, eps=eps)
+    # 注. compare_vectorがスケールの大きさを感知できる、なんらかの手段が必須。→ compare_vector仕様変更により感知できないので一時解除
+    #feat_pred   = torch.nn.functional.normalize(feat_pred,   p=2, dim=2, eps=eps)
+    #feat_target = torch.nn.functional.normalize(feat_target, p=2, dim=2, eps=eps)
     
     feat_pred   = compare_vector("pair", feat_pred)
     feat_target = compare_vector("pair", feat_target)
     # 【補足】 L1-L2という設計原理だけでなく、L1+L2をする作用も存在するが、まあ一致しているに越したことないので、そのままにしておきます（grad過剰累計は気になりますが…）
 
-    scales = 1.5
+    scales = 1.0
     if scales != 1.0:
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
