@@ -313,6 +313,9 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     pixel perfectやドット検出（多少ではあるがエッジ検出）の効果があり、新しい画像要素を発見するのに特に有効。
     どのtimestepでもそこそこの効果を持つ、MSE同等以上の使い勝手を持つ
     特に、高timestepのノイズは、このloss以外に評価できるlossはほとんどなく、他のloss由来のアーティファクトを防ぐ効果がある
+    learning_rateが高過ぎて画面全体が単色傾向になり、学習困難になりそうなときに、きっかけを発生させる力としては使わざるを得ない面もある
+    
+    デメリットとして、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
     """
 
     feat_target   = get_ch_vector(target)
@@ -813,7 +816,7 @@ _LOSS_CONFIG = {
     "pool_32px_me": (1.0, 1.0, 0.0, [None, None]),
     "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
-    #"ch_vector": (1.0, 1.0, 0.0, [None, None]),
+    "ch_vector": (1.0, 1.0, 0.0, [None, None]),
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),   
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
@@ -1325,7 +1328,7 @@ def get_loss_all(
     loss_pool_51px_mean, loss_pool_51px_var = pool_results[0]
     loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
     
-    #loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
+    loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
     
     loss_ch_flow = calc_loss_ch_flow_2(
         target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [0.5, 4.0]
@@ -1359,7 +1362,7 @@ def get_loss_all(
         loss_pool_32px_mean,
         loss_pool_51px_var,        
         loss_pool_32px_var,        
-        #loss_ch_vector, # 一時的に除外。効果はあるが、normalize由来のdirectionｵｰﾊﾞｰｼｭｰﾄ、magnitudeはloss_baseと重複があるっぽい挙動でちょっと扱いにくい
+        loss_ch_vector, 
         loss_ch_flow,
         loss_sparsity,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
