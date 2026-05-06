@@ -151,15 +151,40 @@ def adaptive_avg_pool2d_for_latents(input, output_size):
     return torch.complex(mean.float(), var.float()) # 複素数化によって、チャンネル数を増やすことなく、それぞれ独立した評価を可能にする
 
 def get_ch_vector(x):
-    # latents情報をベクトル表現に直して、勾配予測をアシストする
-    # xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
+    """
+    latents情報をベクトル表現に直して、勾配予測をアシストする
+    xが、target, noise_predのときは、各ピクセルにおけるチャンネル方向の成分比のベクトルを返す
+    
+    数学的挙動に基づく3要素分離
+    1. energy: ベクトルの絶対的な強さ (L2 Norm)
+    2. bias  : 平均値からのズレ、成分の偏りの強さ
+    3. phase : 成分間の比率、多次元空間における向き
+    
+    2と3を分離することで、収束付近での色変化時の振動を減らす。
+    """
 
     eps = 1e-10
     
-    def calc_vector(x):
-        direction = torch.nn.functional.normalize(x.float(), p=2, dim=1, eps=eps)
-        magnitude = torch.abs(x) + eps # 厳密にはsqrt(x^2)とするべきだが計算コストが増加するだけだし、grad導出時の導関数が=1/√(x^2)となり収束期にゼロ除算リスクを生む
-        vector = (direction * magnitude).to(_dtype)
+    def calc_vector(x):        
+        x_float = x.float()
+        
+        x_mean = x_float.mean(dim=1, keepdim=True)
+        diff = x_float - x_mean
+        
+        # 計算時のみ、１つにまとめて効率化
+        combined = torch.stack([x_float, diff], dim=1) # (B, 2, C, H, W)
+        norms = torch.norm(combined, p=2, dim=2, keepdim=True) + eps # (B, 2, 1, H, W)
+        
+        energy, bias = torch.chunk(norms, chunks=2, dim=1)
+        energy = energy.squeeze(1) # (B, 1, H, W)
+        bias = bias.squeeze(1)     # (B, 1, H, W)
+        
+        phase = torch.nn.functional.normalize(diff, p=2, dim=1, eps=eps)
+        
+        vector = (energy * bias * phase).to(_dtype)
+        
+        #print(f"DEBUG: e={energy.mean():.2e}, b={bias.mean():.2e}, p={phase.abs().mean():.2e}, v={vector.abs().mean():.2e}")
+        
         return vector
 
     if torch.is_complex(x):
@@ -322,7 +347,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     feat_pred     = get_ch_vector(noise_pred)
     # 【補足】 潜在的にはベクトル逆転収束＝ V_C1 * V_C2がtarget,pred間で反転 = lossゼロを許容してしまうが、その他のloss多数で抑制されるはず。計算コスト削減のために妥協
 
-    scales = 1.0
+    scales = 0.5
     if scales != 1.0:
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
