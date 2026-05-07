@@ -181,7 +181,7 @@ def get_ch_vector(x):
         
         phase = torch.nn.functional.normalize(diff, p=2, dim=1, eps=eps)
         
-        vector = (energy * bias * phase).to(_dtype)
+        vector = (energy * (bias+0.01) * phase).to(_dtype) # energyは0=黒なら評価不要。biasはグレー時に情報欠落しないようにオフセット。phaseは常に大きさ１
         
         #print(f"DEBUG: e={energy.mean():.2e}, b={bias.mean():.2e}, p={phase.abs().mean():.2e}, v={vector.abs().mean():.2e}")
         
