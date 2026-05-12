@@ -259,6 +259,22 @@ def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c
         )
         
     return loss
+
+def get_snr_weight_map(max_snr_weight):
+    """
+    グローバル変数のcurrent_snr_weight（batch別の0-1の範囲）に対して、
+    snr_weightが高すぎる領域において影響度を下げるweightを作成する
+    
+    max_snr_weight : snr_weightのうち、どのくらいの値以下を学習対象とするか。
+    """
+    snr_weight_map = _current_snr_weight.view(-1, 1)
+    snr_weight_map = torch.where(
+        snr_weight_map < max_snr_weight, 
+        snr_weight_map, 
+        torch.zeros_like(snr_weight_map)
+    )
+    
+    return snr_weight_map
     
 # ==============================================================================================
 
@@ -323,11 +339,10 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     )
     
     # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない
-    snr_weight = _current_snr_weight.view(-1, 1)
-    snr_weight = torch.where(snr_weight < 0.8, snr_weight, torch.zeros_like(snr_weight))
+    snr_weight_map = get_snr_weight_map(max_snr_weight = 0.8)   
     
-    loss_real = loss_real * snr_weight
-    loss_imag = loss_imag * snr_weight
+    loss_real = loss_real * snr_weight_map
+    loss_imag = loss_imag * snr_weight_map
     
     return loss_real, loss_imag
     
@@ -742,7 +757,7 @@ def calc_loss_batch_relation(
 
             features = [x_vector]
             
-            boost   = 1.0
+            boost   = 0.5
 
         elif mode=="ch_sparsity":
             # 設計思想はloss_ch_sparsityと同等
@@ -1377,24 +1392,27 @@ def get_loss_all(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
     )
    
+    # loss_base低下を最優先にさせるための変数
+    loss_base_alt = loss_base.mean() * 2.0 + 1e-8  # loss_base=1.0を基準として、倍率設定
+    
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
         loss_outside,
         #loss_high_loss_area, # 開発中
-        loss_pool_51px_mean,
-        loss_pool_32px_mean,
-        loss_pool_51px_var,        
-        loss_pool_32px_var,        
+        loss_pool_51px_mean * loss_base_alt,
+        loss_pool_32px_mean * loss_base_alt,
+        loss_pool_51px_var * loss_base_alt,        
+        loss_pool_32px_var * loss_base_alt,        
         loss_ch_vector, 
-        loss_ch_flow,
-        loss_sparsity,
+        loss_ch_flow * loss_base_alt,
+        loss_sparsity * loss_base_alt,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
-        loss_batch_pool_64px,
-        loss_batch_pixel,
-        #loss_batch_ch_vector,
-        loss_batch_sparsity,
+        loss_batch_pool_64px * loss_base_alt,
+        loss_batch_pixel * loss_base_alt,
+        #loss_batch_ch_vector * loss_base_alt,
+        loss_batch_sparsity * loss_base_alt ,
     ]
     
     # NaN/Inf補正およびnoise_predとのペアリング
