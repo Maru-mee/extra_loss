@@ -262,10 +262,11 @@ def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c
         
     return loss
 
-def get_snr_weight_map(max_snr_weight):
+def apply_snr_weight_cutoff(loss, max_snr_weight):
     """
     グローバル変数のcurrent_snr_weight（batch別の0-1の範囲）に対して、
-    snr_weightが高すぎる領域において影響度を下げるweightを作成する
+    snr_weightが高すぎる領域において影響度を下げるweightを作成して、
+    lossへ適用
     
     max_snr_weight : snr_weightのうち、どのくらいの値以下を学習対象とするか。
     """
@@ -275,8 +276,9 @@ def get_snr_weight_map(max_snr_weight):
         snr_weight_map, 
         torch.zeros_like(snr_weight_map)
     )
+    loss = loss * snr_weight_map
     
-    return snr_weight_map
+    return loss
     
 # ==============================================================================================
 
@@ -340,11 +342,9 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
         huber_c=huber_c
     )
     
-    # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない
-    snr_weight_map = get_snr_weight_map(max_snr_weight = 0.8)   
-    
-    loss_real = loss_real * snr_weight_map
-    loss_imag = loss_imag * snr_weight_map
+    # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない    
+    loss_real = apply_snr_weight_cutoff(loss_real, max_snr_weight = 0.8)
+    loss_imag = apply_snr_weight_cutoff(loss_imag, max_snr_weight = 0.8)
     
     return loss_real, loss_imag
     
