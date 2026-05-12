@@ -179,11 +179,13 @@ def get_ch_vector(x):
         energy = energy.squeeze(1) # (B, 1, H, W)
         bias = bias.squeeze(1)     # (B, 1, H, W)
         
-        phase = torch.nn.functional.normalize(diff, p=2, dim=1, eps=eps)
+        diff_norm = torch.norm(diff, p=2, dim=1, keepdim=True)
+        phase = diff / (diff_norm + eps)
+        # 備考： phase = normalize(diff, p=2, )は、RGBが微小入力でも増幅してオーバーシュート要因になるので禁止
         
-        vector = (energy * (bias+0.01) * phase).to(_dtype) # energyは0=黒なら評価不要。biasはグレー時に情報欠落しないようにオフセット。phaseは常に大きさ１
+        vector = (energy * (bias+0.01) * phase).to(_dtype) # energyは0=黒なら評価不要。biasはグレー時に情報欠落しないようにオフセット。phaseはepsがあるので非０
         
-        #print(f"DEBUG: e={energy.mean():.2e}, b={bias.mean():.2e}, p={phase.abs().mean():.2e}, v={vector.abs().mean():.2e}")
+        #print_storage("keep", f"DEBUG: e={energy.mean():.2e}, b={bias.mean():.2e}, p={phase.abs().mean():.2e}, v={vector.abs().mean():.2e}")
         
         return vector
 
@@ -483,7 +485,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         feat_pred,
         feat_target,
         reduction="none", 
-        loss_type="l2",
+        loss_type=args.loss_type,
         huber_c=huber_c
     )
     
@@ -1406,13 +1408,13 @@ def get_loss_all(
         loss_pool_51px_var * loss_base_alt,        
         loss_pool_32px_var * loss_base_alt,        
         loss_ch_vector, 
-        loss_ch_flow * loss_base_alt,
+        loss_ch_flow,
         loss_sparsity * loss_base_alt,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px * loss_base_alt,
         loss_batch_pixel * loss_base_alt,
         #loss_batch_ch_vector * loss_base_alt,
-        loss_batch_sparsity * loss_base_alt ,
+        loss_batch_sparsity * loss_base_alt,
     ]
     
     # NaN/Inf補正およびnoise_predとのペアリング
