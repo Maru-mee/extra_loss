@@ -485,7 +485,7 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
         feat_pred,
         feat_target,
         reduction="none", 
-        loss_type=args.loss_type,
+        loss_type="l2", # ピクセル間の相対評価でしかなく、周囲のクロップ、ボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
         huber_c=huber_c
     )
     
@@ -827,12 +827,19 @@ def calc_loss_batch_relation(
                 if scales != 1.0:                    
                     feat_pred = feat_pred * scales
                     feat_target = feat_target * scales
+                
+                if mode=="pool":                
+                    loss_type = "l2" # 収束時の精度が低く,grad_maxが高いため、非収束時向けのためL2を使う
+                elif mode=="pixel" or mode=="ch_vector" or mode=="ch_sparsity": 
+                    loss_type = "l2" # L1かL2か悩ましい。loss_extraのコンセプトを強調しつつトークン意味固着予防するという点では、L1でも良い気もするがデバッグではやや不安定
+                elif mode=="others":    
+                    loss_type=args.loss_type
                     
                 loss = apply_conditional_loss(
                     feat_pred,
                     feat_target,
                     reduction="none",
-                    loss_type="l2", # batch毎にsnrが異なるため、loss_type=smooth_l1, huber_schedule=snrの組合せだけは絶対に回避するべき
+                    loss_type=loss_type, # batch毎にsnrが異なるため、loss_type=smooth_l1, huber_schedule=snrの組合せだけは絶対に回避するべき。
                     huber_c=huber_c
                 )
                 
@@ -852,7 +859,7 @@ _LOSS_CONFIG = {
     # カテゴリ      :lossの種類のカテゴリを示す。同一カテゴリであることの識別であるため、名前そのものには意味がない
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
-    "outside": (1.0, 1.0, 0.0, [None, None]),
+    # "outside": (1.0, 1.0, 0.0, [None, None]),
     # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
     "pool_51px_me": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_me": (1.0, 1.0, 0.0, [None, None]),
@@ -1168,12 +1175,10 @@ def combine_losses_dynamically(
                     after_norm = torch.norm(gi_flat)
                     total_reduction_norm += abs((before_norm - after_norm).item())
                     original_norms_sum += before_norm.item()
-
-            # 修正済み平坦化テンソルを格納
+                        
             edited_grads_temp[i] = gi_flat
 
         if is_debug_mode_PCgrad:            
-            # PCGrad 統計値の計算
             reduction_rate = (total_reduction_norm / (original_norms_sum + 1e-10)) * 100
             print_storage("keep", f" [PCGrad Stats] Conflicts(+-unmatch): {conflict_count} | Grad Cut Rate: {reduction_rate:.2f}%")
         
@@ -1357,7 +1362,7 @@ def get_loss_all(
     #target_gaus    = filtering_gaussian(target_mod)
     #pred_gaus      = filtering_gaussian(pred_mod)  
 
-    loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
+    #loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
     #loss_high_loss_area = calc_loss_focus("high_loss_area", target_mod, pred_mod, args, huber_c)    
     
     pool_results = [
@@ -1393,28 +1398,25 @@ def get_loss_all(
     loss_batch_sparsity = calc_loss_batch_relation(
         target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
     )
-   
-    # loss_base低下を最優先にさせるための変数
-    loss_base_alt = loss_base.mean() * 2.0 + 1e-8  # loss_base=1.0を基準として、倍率設定
-    
+       
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
-        loss_outside,
+        #loss_outside,
         #loss_high_loss_area, # 開発中
-        loss_pool_51px_mean * loss_base_alt,
-        loss_pool_32px_mean * loss_base_alt,
-        loss_pool_51px_var * loss_base_alt,        
-        loss_pool_32px_var * loss_base_alt,        
+        loss_pool_51px_mean,
+        loss_pool_32px_mean,
+        loss_pool_51px_var,        
+        loss_pool_32px_var,        
         loss_ch_vector, 
         loss_ch_flow,
-        loss_sparsity * loss_base_alt,
+        loss_sparsity,
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
-        loss_batch_pool_64px * loss_base_alt,
-        loss_batch_pixel * loss_base_alt,
-        #loss_batch_ch_vector * loss_base_alt,
-        loss_batch_sparsity * loss_base_alt,
+        loss_batch_pool_64px,
+        loss_batch_pixel,
+        #loss_batch_ch_vector,
+        loss_batch_sparsity,
     ]
     
     # NaN/Inf補正およびnoise_predとのペアリング
