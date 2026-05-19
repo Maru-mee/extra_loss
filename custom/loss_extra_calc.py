@@ -252,33 +252,62 @@ def compare_vector(mode, x):
 def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
     # 基本的には、sd-scripts/train_utilからの参照
     
-    if torch.is_complex(feat_pred):
-        loss_real = train_util.conditional_loss(
-            feat_pred.real.float(), 
-            feat_target.real.float(),
-            reduction="none", 
-            loss_type=loss_type,
-            huber_c=huber_c
-        )
-        loss_imag = train_util.conditional_loss(
-            feat_pred.imag.float(), 
-            feat_target.imag.float(),
-            reduction="none", 
-            loss_type=loss_type,
-            huber_c=huber_c
-        )
-        loss = loss_real + loss_imag
-    
-    else:
-        loss = train_util.conditional_loss(
-            feat_pred.float(), 
-            feat_target.float(),
-            reduction="none", 
-            loss_type=loss_type,
-            huber_c=huber_c
-        )
+    if loss_type == "huber":
+        # sd-scriptsよりも、c値を高く取りたい場合のモード。
+        # L2を使用したいが、外れ値をL1にしたい場合に使う
         
-    return loss
+        if torch.is_complex(feat_pred):
+            loss_real = torch.nn.functional.huber_loss(
+                feat_pred.real.float(), 
+                feat_target.real.float(),
+                reduction="none", 
+                delta=1.0
+            )
+            loss_imag = torch.nn.functional.huber_loss(
+                feat_pred.imag.float(), 
+                feat_target.imag.float(),
+                reduction="none", 
+                delta=1.0
+            )
+            loss = loss_real + loss_imag
+        
+        else:
+            loss = torch.nn.functional.huber_loss(
+                feat_pred.float(), 
+                feat_target.float(),
+                reduction="none", 
+                delta=1.0
+            )
+        return loss * 2.0 # 数式上、L2よりも半減するので、２倍にしてカバー            
+        
+    else:    
+        if torch.is_complex(feat_pred):
+            loss_real = train_util.conditional_loss(
+                feat_pred.real.float(), 
+                feat_target.real.float(),
+                reduction="none", 
+                loss_type=loss_type,
+                huber_c=huber_c
+            )
+            loss_imag = train_util.conditional_loss(
+                feat_pred.imag.float(), 
+                feat_target.imag.float(),
+                reduction="none", 
+                loss_type=loss_type,
+                huber_c=huber_c
+            )
+            loss = loss_real + loss_imag
+        
+        else:
+            loss = train_util.conditional_loss(
+                feat_pred.float(), 
+                feat_target.float(),
+                reduction="none", 
+                loss_type=loss_type,
+                huber_c=huber_c
+            )
+        
+        return loss
 
 def apply_snr_weight_cutoff(loss, max_snr_weight):
     """
@@ -348,13 +377,13 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     loss_real = apply_conditional_loss(
         feat_pred.real.float(), 
         feat_target.real.float(),
-        loss_type="l2",
+        loss_type="huber",
         huber_c=huber_c
     )
     loss_imag = apply_conditional_loss(
         feat_pred.imag.float(), 
         feat_target.imag.float(),
-        loss_type="l2",
+        loss_type="huber",
         huber_c=huber_c
     )
     
@@ -395,7 +424,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     return loss
 
 
-def calc_loss_ch_flow(target, noise_pred, args, huber_c, is_above_limit, searching_radius=[2.0, 5.0], loss_type = "l2"):
+def calc_loss_ch_flow(target, noise_pred, args, huber_c, is_above_limit, searching_radius=[2.0, 5.0], loss_type = None):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
@@ -499,7 +528,7 @@ def calc_loss_ch_flow(target, noise_pred, args, huber_c, is_above_limit, searchi
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        loss_type=loss_type, # デフォルtはL2。ピクセル間の相対評価でしかなく、周囲のクロップ、ボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
+        loss_type="huber", # デフォルトはL2ライク系。ピクセル間の相対評価でしかなく、周囲のクロップやボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
         huber_c=huber_c
     )
     
@@ -564,11 +593,8 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c, loss_type = None):
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
         
-    if loss_type == "l1":
-        # loss_focus(lossがゼロクロスしにくいほど高い場合に対象とする)        
-        pass
-    else:
-        loss_type = loss_type=args.loss_type
+    if loss_type is None:
+        loss_type = args.loss_type        
 
     loss = apply_conditional_loss(
         feat_pred,
@@ -577,7 +603,7 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c, loss_type = None):
         huber_c=huber_c
     )
 
-    return loss    
+    return loss
 
 
     
@@ -847,9 +873,9 @@ def calc_loss_batch_relation(
                     feat_target = feat_target * scales
                 
                 if mode=="pool":                
-                    loss_type = "l2" # 収束時の精度が低く,grad_maxが高いため、非収束時向けのためL2を使う
+                    loss_type = "huber" # 収束時の精度が低く,grad_maxが高いため、非収束時向けのためL2を使う
                 elif mode=="pixel" or mode=="ch_vector" or mode=="ch_sparsity": 
-                    loss_type = "l2" # L1かL2か悩ましい。loss_extraのコンセプトを強調しつつトークン意味固着予防するという点では、L1でも良い気もするがデバッグではやや不安定
+                    loss_type = "huber" # L1かL2か悩ましい。loss_extraのコンセプトを強調しつつトークン意味固着予防するという点では、L1でも良い気もするがデバッグではやや不安定
                 elif mode=="others":    
                     loss_type=args.loss_type
                     
@@ -1400,7 +1426,7 @@ def get_loss_all(
     loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
     
     if is_good_size:
-        loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "l1") 
+        loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "huber") 
         # L1の理由は、もともとlossが大きいところの領域なので、L1にしても、gradのゼロクロスは発生しにくく、オーバーシュートにはなりにくいと判断。あと綺麗さ確保のため
     else:
         loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
