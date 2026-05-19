@@ -1,6 +1,3 @@
-
-
-
 各種学習スクリプトに対して、新しいlossを追加するスクリプトです。<br>
 sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 
@@ -35,17 +32,17 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/260fb6e3-ae06-4e5c-bbe8-3f1686cd60a9" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/4359f555-0387-4138-a884-79566b0cebe3" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
-  * full_body, ポーズ, 画風が、早期に再現及び維持できています。
+  * full_body, standing_on_one_leg, 画風が、早期に再現及び維持できています。
   * 構造と無関係なノイズ感が低下します。
   * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、一貫性のある変化をしています
   * 発色がより鮮やかになります。
   * 上記サンプル画像における学習改善の影響が、データセット全体に対する認識力改善に寄与します。
   * モデル：sd_xl_base_1.0 (Stability_AI)
   * データセット：<https://zunko.jp/con_illust.html>よりお借りしました。
-  * 【参考】 図はloss_extra_calc_v1.00を使用
+  * 【参考】 図はloss_extra_calc_v1.02を使用
 <details><summary>キャプション</summary>
 zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, open mouth, very long hair, weapon, polearm, short kimono, full body, white_background, standing on one leg, dark green hair, looking at viewer, standing, sandals, simple background, sash, tasuki, :d, obi, naginata, geta --d 341 --s 30 --w 1024 --h 1024 --l 4.0
 </details>
@@ -65,8 +62,8 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
 * ε-pred, v-predに対応。
   * それ以外については、latentsに特化している都合により効果が得にくく、また、snr_weightによるノイズ状況による補正が働かないため、十分な効果は得にくくなります。
 * batch_size=2以上を推奨。
-  * 1でも機能しますが、batchを活用したlossを活用できなくなります。
-* alpha_maskのデータセットには非対応。技術的には可能ですが実装が面倒なので省略。 
+  * 1でも機能しますが、batchを活用したlossを活用できなくなり、ちょっともったいないです。
+* alpha_maskのデータセットには非対応。技術的には可能ですが、検証環境がないため。 
 * 画像解像度512以上に合わせてチューニング済
   * 解像度512px未満の画像ではいくつかのloss計算がskipされます。低解像度のノイズを拾わないようにするため。
  したがって、512px未満の画像は残しても害はありませんが、効果を体感しにくくなります。
@@ -110,13 +107,7 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
   * debiased_estimation
   * min_snr_gamma
   * multires_noise_iteration
-  * loss_type。L2だけは避けたほうがいいでしょう
-  <details><summary>理由</summary>
-   * L2単体だと、L2のハズレ値を学ぶという特性に加えて、loss_extra_calcによる詳細を学ぶという特性が相乗効果を生み、良い結果にはなりにくいです。
-   * ただでさえ多数のloss(grad)登場により、loss-weight曲面が複雑になっているのに対して、さらにL2にしてしまうとlossの山谷がより急峻になり、局所解からの脱出が極めて困難になります。
-   * そうならないように山谷が急にならないよう配慮した設計はしているものの、限度があります。
-   * 別の目線では、L2にしなくても、多数のlossによってウェイトをガッチリホールドできているとも言えます。
-  </details>  
+  * loss_type
   
 ## 補足
 * もし、効きが強過ぎると感じた場合は、_LOSS_CONFIGの重み倍率を調整してみてください
