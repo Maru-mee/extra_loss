@@ -71,64 +71,82 @@ def get_image_hw(image_tensor):
     area_img = area_latents * 64
     return H, W, area_latents, area_img
 
-# キャッシュを格納する辞書
-_gauss_ker_cache = collections.defaultdict(dict)
-def filtering_gaussian(x):
+def latents_focus(target, noise_pred, cropped_size=128):
     """
-    入力テンソルxにガウシアンフィルタを適用した結果を返します。
-    （元の get_gaussian_kernel 関数の機能を変更）
-
-    Args:
-        x (torch.Tensor): 入力テンソル（noise_predまたはtarget）。(B, C, H, W)
-        dtype (torch.dtype): テンソルのデータ型。
-        device (torch.device): テンソルのデバイス。
-
-    Returns:
-        torch.Tensor: ガウシアンフィルタを適用した結果。
+    target, noise_predに対して、
+    lossが大きい正方形領域１つだけをcropする
+    領域を段階的に絞り込んでいくことで、浮島のようなメインではない不連続物体への適合を防ぐ
     """
-
-    # フィルタのパラメータ設定 (元の関数から流用)
-    ksize = 3
-    sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
-    channels = x.shape[1]
     
-    # カーネルのキャッシュキーを生成
-    ksize_tuple = (ksize, ksize)
-    dtype_str = str(_dtype)
-
-    # キャッシュをチェック
-    if ksize_tuple in _gauss_ker_cache[sigma] and dtype_str in _gauss_ker_cache[sigma][ksize_tuple]:
-        kernel_2d = _gauss_ker_cache[sigma][ksize_tuple][dtype_str].to(_device, dtype=_dtype)
-    else:
-        # カーネルの生成（1D）
-        kernel_1d = cv2.getGaussianKernel(ksize, sigma)
-        kernel_1d = torch.from_numpy(kernel_1d).to(_dtype).to(_device)
+    H, W, _, _ = get_image_hw(target)
+    B = target.shape[0]
+       
+    detect_sizes = [min(min(H, W), s // 8) 
+        for s in [
+            cropped_size * 4, # = 2^2
+            cropped_size * 2, 
+            cropped_size
+        ]
+    ]
+    
+    # 最終的なターゲットサイズが確保できない場合はスキップ
+    is_good_size = (H >= detect_sizes[-1]) and (W >= detect_sizes[-1])
+    if not is_good_size:
+        return target, noise_pred, is_good_size
         
-        # 2Dカーネルに変換 (1, 1, H, W)
-        kernel_2d = torch.matmul(kernel_1d, kernel_1d.T).unsqueeze(0).unsqueeze(0)
-
-        # キャッシュに格納 (チャネル軸を持つ前の 2D カーネルを CPU に格納)
-        if ksize_tuple not in _gauss_ker_cache[sigma]:
-            _gauss_ker_cache[sigma][ksize_tuple] = {}
+    # Initialize
+    loss_heatmap = torch.abs(target - noise_pred).mean(dim=1, keepdim=True).to(device=_device, dtype=_dtype)
+    top_left_y = torch.zeros(B, dtype=torch.long, device=_device)
+    top_left_x = torch.zeros(B, dtype=torch.long, device=_device)
+    window_h, window_w = H, W
+    
+    for detect_size in detect_sizes:
+        for i in range(B):
             
-        _gauss_ker_cache[sigma][ksize_tuple][dtype_str] = kernel_2d.detach().clone().cpu()
+            # ヒートマップから、現在の探索対象となる範囲を窓状に切り出し
+            search_window = loss_heatmap[
+                i : i + 1,                                 # B
+                :,                                         # C
+                top_left_y[i] : top_left_y[i] + window_h,        # H
+                top_left_x[i] : top_left_x[i] + window_w         # W
+            ]
+            
+            kernel = torch.ones(
+                (1, 1, detect_size, detect_size), 
+                device=_device, 
+                dtype=_dtype
+            )
 
-    # チャネル数に対応させる (C, 1, H, W)
-    kernel = kernel_2d.repeat(channels, 1, 1, 1)
+            # lossが最大のエリアの座標を取得             
+            loss_sum_map = torch.nn.functional.conv2d(search_window, kernel)
+            top_loss_area = loss_sum_map.view(1, -1).argmax(dim=1).item()
+            top_left_y[i] += top_loss_area // loss_sum_map.size(-1)
+            top_left_x[i] += top_loss_area % loss_sum_map.size(-1)
+            
+        window_h, window_w = detect_size, detect_size
+
+    target_focused = [
+        target[
+            i, 
+            :, 
+            top_left_y[i] : top_left_y[i] + window_h, 
+            top_left_x[i] : top_left_x[i] + window_w
+        ]for i in range(B)
+    ]
+
+    pred_focused = [
+        noise_pred[
+            i, 
+            :, 
+            top_left_y[i] : top_left_y[i] + window_h, 
+            top_left_x[i] : top_left_x[i] + window_w
+        ] for i in range(B)
+    ]
     
-    # ガウシアンフィルタを適用
-    # `groups=channels`でチャネルごとの畳み込み、`padding`は ksize から自動計算
-    padding = ksize // 2 
+    target_focused = torch.stack(target_focused)
+    pred_focused = torch.stack(pred_focused)
     
-    filtered_x = torch.nn.functional.conv2d(
-        input=x.float(),
-        weight=kernel.float(),
-        padding=padding, 
-        groups=channels
-    )
-    filtered_x = filtered_x.to(_dtype)
-    
-    return filtered_x
+    return target_focused, pred_focused, is_good_size
 
 def adaptive_avg_pool2d_for_latents(input, output_size):
     """
@@ -231,21 +249,21 @@ def compare_vector(mode, x):
      
     """
     
-def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c):
+def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
     # 基本的には、sd-scripts/train_utilからの参照
     
     if torch.is_complex(feat_pred):
         loss_real = train_util.conditional_loss(
             feat_pred.real.float(), 
             feat_target.real.float(),
-            reduction=reduction, 
+            reduction="none", 
             loss_type=loss_type,
             huber_c=huber_c
         )
         loss_imag = train_util.conditional_loss(
             feat_pred.imag.float(), 
             feat_target.imag.float(),
-            reduction=reduction, 
+            reduction="none", 
             loss_type=loss_type,
             huber_c=huber_c
         )
@@ -255,7 +273,7 @@ def apply_conditional_loss(feat_pred, feat_target, reduction, loss_type, huber_c
         loss = train_util.conditional_loss(
             feat_pred.float(), 
             feat_target.float(),
-            reduction=reduction, 
+            reduction="none", 
             loss_type=loss_type,
             huber_c=huber_c
         )
@@ -330,14 +348,12 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     loss_real = apply_conditional_loss(
         feat_pred.real.float(), 
         feat_target.real.float(),
-        reduction="none",
         loss_type="l2",
         huber_c=huber_c
     )
     loss_imag = apply_conditional_loss(
         feat_pred.imag.float(), 
         feat_target.imag.float(),
-        reduction="none",
         loss_type="l2",
         huber_c=huber_c
     )
@@ -372,7 +388,6 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
     )
@@ -380,7 +395,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     return loss
 
 
-def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searching_radius=[2.0, 5.0]):
+def calc_loss_ch_flow(target, noise_pred, args, huber_c, is_above_limit, searching_radius=[2.0, 5.0], loss_type = "l2"):
     """
     連続座標サンプリングによるベクトル相関を全方位・等距離で同期。
     真円状のエッジ検出に優れている。ピクセル単位ではなく、該当距離（ピクセルの隙間含む）の値を滑らかに取るためノイズに強い
@@ -484,14 +499,13 @@ def calc_loss_ch_flow_2(target, noise_pred, args, huber_c, is_above_limit, searc
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        reduction="none", 
-        loss_type="l2", # ピクセル間の相対評価でしかなく、周囲のクロップ、ボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
+        loss_type=loss_type, # デフォルtはL2。ピクセル間の相対評価でしかなく、周囲のクロップ、ボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
         huber_c=huber_c
     )
     
     return loss
 
-def calc_loss_sparsity(target, noise_pred, args, huber_c):
+def calc_loss_sparsity(target, noise_pred, args, huber_c, loss_type = None):
     """
     チャンネル間の情報の尖り具合（スパース性）を同期させる。
     一般的なloss_MSEは、茶色やグレー単色の画像を好む。なぜならば、それが最も手軽に到達できる平均解であるため。
@@ -549,12 +563,17 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c):
     if scales != 1.0:
         feat_pred = feat_pred * scales
         feat_target = feat_target * scales
+        
+    if loss_type == "l1":
+        # loss_focus(lossがゼロクロスしにくいほど高い場合に対象とする)        
+        pass
+    else:
+        loss_type = loss_type=args.loss_type
 
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        reduction="none",
-        loss_type=args.loss_type,
+        loss_type=loss_type,
         huber_c=huber_c
     )
 
@@ -678,7 +697,6 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        reduction="none",
         loss_type=args.loss_type,
         huber_c=huber_c
     )
@@ -686,7 +704,7 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
     return loss    
     
 def calc_loss_batch_relation(
-    target, noise_pred, args, huber_c, area_latents, is_above_limit, mode, scale_px=1024,
+    target, noise_pred, args, huber_c, is_above_limit, mode, scale_px=1024,
 ):
     """
     ・バッチ内の画像間の類似度構造（Relation）をターゲットと同期させることで、
@@ -838,7 +856,6 @@ def calc_loss_batch_relation(
                 loss = apply_conditional_loss(
                     feat_pred,
                     feat_target,
-                    reduction="none",
                     loss_type=loss_type, # batch毎にsnrが異なるため、loss_type=smooth_l1, huber_schedule=snrの組合せだけは絶対に回避するべき。
                     huber_c=huber_c
                 )
@@ -866,8 +883,9 @@ _LOSS_CONFIG = {
     "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
     "ch_vector": (1.0, 1.0, 0.0, [None, None]),
-    "ch_flow":  (1.0, 1.0, 0.0, [None, None]),
-    "sparsity":  (1.0, 1.0, 0.0, [None, None]),   
+    "ch_flow":  (1.0, 1.0, 0.0, [None, None]), 
+    "sparsity":  (1.0, 1.0, 0.0, [None, None]),
+    "spars.focus":  (0.5, 1.0, 0.0, [None, None]),  # sparsity通常版と比べて小さく設定       
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1328,9 +1346,7 @@ def get_loss_all(
     huber_c,
 ):
     
-    global _random_seed_1, _dtype, _device
-    # 生成用ランダムseed 
-    _random_seed_1 = random.randint(0, 2**32 - 1)
+    # loss計算用パラメータの準備 =======================================
     
     # 縮小処理をする場合の下限面積[元画像サイズベースのpx単位]
     area_lower_limit_img        = 512 ** 2 
@@ -1344,60 +1360,55 @@ def get_loss_all(
     # 低解像度画像が優位になりすぎてしまうlossに対して影響度を下げる
     reso_scale = min(1.0, math.sqrt((H * W) / (128 * 128)))
     #print(f"reso_scale\t{reso_scale}") for debug
-        
-    # 各lossの算出=====================================
-
-    _dtype = target.dtype
-    _device = target.device
 
     # バッチ次元がない場合は追加 (C, H, W) -> (1, C, H, W)
     is_batched = (target.dim() == 4)
     target_mod = target if is_batched else target.unsqueeze(0)
     pred_mod = noise_pred if is_batched else noise_pred.unsqueeze(0)
     
-    # 過適合の心配があるloss向けに、gaussianフィルタをかける
-    # 適用条件： poolを使用しない関数であること（あるならば適用しても意味がない）。
-    # ピクセル比較を重要視しているloss(使用したら存在意義を失う)。
-    # いくら上記を満たそうとも、ピクセル比較系lossが多すぎると、過適合になる。そのため、一部のピクセル系lossは妥協して適用させるべき
-    #target_gaus    = filtering_gaussian(target_mod)
-    #pred_gaus      = filtering_gaussian(pred_mod)  
+    target_focus_128px, pred_focus_128px, is_good_size = latents_focus(target_mod, pred_mod, cropped_size=128) 
+    
+    common_kwargs_normal = {
+        "target": target_mod,
+        "noise_pred": pred_mod,
+        "args": args,
+        "huber_c": huber_c
+    }
+    
+    common_kwargs_focus = {
+        "target": target_focus_128px,
+        "noise_pred": pred_focus_128px,
+        "args": args,
+        "huber_c": huber_c
+    } 
 
-    #loss_outside = calc_loss_focus("outside", target_mod, pred_mod, args, huber_c)
-    #loss_high_loss_area = calc_loss_focus("high_loss_area", target_mod, pred_mod, args, huber_c)    
+    
+    # 各lossの算出=====================================
+
+    # loss_outside = calc_loss_focus("outside", **common_kwargs_normal)
+    # loss_high_loss_area = calc_loss_focus("high_loss_area", **common_kwargs_normal)    
     
     pool_results = [
-        calc_loss_pool(
-            target_mod, pred_mod, args, huber_c, is_above_limit, scale_px=sp
-        )
+        calc_loss_pool(**common_kwargs_normal, is_above_limit = is_above_limit, scale_px=sp) 
         for sp in [51, 32]  # 32pxと独立性が強く、計算コストの比較的低い値=51px
     ]
-
     loss_pool_51px_mean, loss_pool_51px_var = pool_results[0]
     loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
     
-    loss_ch_vector = calc_loss_ch_vector(target_mod, pred_mod, args, huber_c)
+    loss_ch_vector = calc_loss_ch_vector(**common_kwargs_normal)    
+    loss_ch_flow = calc_loss_ch_flow(**common_kwargs_normal, is_above_limit=is_above_limit, searching_radius = [0.5, 4.0])
+    loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
     
-    loss_ch_flow = calc_loss_ch_flow_2(
-        target_mod, pred_mod, args, huber_c, is_above_limit, searching_radius = [0.5, 4.0]
-    )
+    if is_good_size:
+        loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "l1") 
+        # L1の理由は、もともとlossが大きいところの領域なので、L1にしても、gradのゼロクロスは発生しにくく、オーバーシュートにはなりにくいと判断。あと綺麗さ確保のため
+    else:
+        loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
     
-    loss_sparsity = calc_loss_sparsity(target_mod, pred_mod, args, huber_c)  
-    
-    loss_batch_pool_64px = calc_loss_batch_relation(
-        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit,  mode="pool", scale_px=64
-    )
-
-    loss_batch_pixel = calc_loss_batch_relation(
-        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="pixel",
-    )
-    
-    #loss_batch_ch_vector = calc_loss_batch_relation(
-    #    target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_vector",
-    #)
-    
-    loss_batch_sparsity = calc_loss_batch_relation(
-        target_mod, pred_mod, args, huber_c, area_latents, is_above_limit=True, mode="ch_sparsity",
-    )
+    loss_batch_pool_64px = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=is_above_limit,  mode="pool", scale_px=64)
+    loss_batch_pixel = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="pixel")    
+    #loss_batch_ch_vector = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="ch_vector")
+    loss_batch_sparsity = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="ch_sparsity")
        
     # 統合するlossをリスト化する。
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
@@ -1410,8 +1421,9 @@ def get_loss_all(
         loss_pool_51px_var,        
         loss_pool_32px_var,        
         loss_ch_vector, 
-        loss_ch_flow,
+        loss_ch_flow,     
         loss_sparsity,
+        loss_sparsity_focus,        
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
@@ -1439,9 +1451,13 @@ def calc_extra_losses(
     snr_weight_view, # 高ノイズ領域のときほど値が大きくなる係数（0～1.0）
     current_mask=None,
 ):
-    global _current_snr_weight, _current_mask
+    global _current_snr_weight, _current_mask,  _dtype, _device, _random_seed_1
+    
     _current_snr_weight = snr_weight_view
     _current_mask = current_mask
+    _dtype = target.dtype
+    _device = target.device
+    _random_seed_1 = random.randint(0, 2**32 - 1)
     
     if is_debug_time:
         start_time = time.time()
