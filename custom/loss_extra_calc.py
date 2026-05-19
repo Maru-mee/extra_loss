@@ -336,6 +336,7 @@ def apply_snr_weight_cutoff(loss, max_snr_weight):
     
 # ==============================================================================================
 
+
 def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     """
     画像単体のpool分割したうえで、それぞれの領域を比較する。
@@ -739,6 +740,41 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
     )
 
     return loss    
+
+def calc_loss_gram(target, noise_pred, args, huber_c):
+    """
+    ピクセル間の相対差を評価するloss.
+    相対情報に特化しており、トークン学習に効果があると思われる。
+    パーツ間の自然なつながりを要求する
+    
+    絶対値についてはこだわらない。
+    """
+    
+    B, C, H, W = target.shape
+    HW = H * W
+
+    # (B, C, H, W) -> (B, C, H*W)
+    feat_pred   = noise_pred.flatten(start_dim=2)
+    feat_target = target.flatten(start_dim=2)
+
+    # (B, C, H*W) @ (B, H*W, C) -> (B, C, C), H*W面積で割って正規化
+    feat_pred   = torch.div(torch.bmm(feat_pred, feat_pred.transpose(1, 2)), H * W)
+    feat_target = torch.div(torch.bmm(feat_target, feat_target.transpose(1, 2)), H * W)
+    
+    scales = 1.0
+    if scales != 1.0:
+        feat_pred = feat_pred * scales
+        feat_target = feat_target * scales    
+
+    loss = apply_conditional_loss(
+        feat_pred,
+        feat_target,
+        loss_type=args.loss_type,
+        huber_c=huber_c
+    )
+
+    return loss   
+
     
 def calc_loss_batch_relation(
     target, noise_pred, args, huber_c, is_above_limit, mode, scale_px=1024,
@@ -914,16 +950,17 @@ _LOSS_CONFIG = {
     # 役割        ：同一カテゴリ内の処理を行う際、どれをbaseとするかの判定に使用する
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     # "outside": (1.0, 1.0, 0.0, [None, None]),
-    # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),    
+    # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),   
     "pool_51px_me": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_me": (1.0, 1.0, 0.0, [None, None]),
     "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
     "ch_vector": (1.0, 1.0, 0.0, [None, None]),
-    "ch_vec.focus": (0.5, 1.0, 0.0, [None, None]),    
+    #"ch_vec.focus": (0.5, 1.0, 0.0, [None, None]),    
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]), 
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
-    #"spars.focus":  (0.5, 1.0, 0.0, [None, None]),     
+    #"spars.focus":  (0.5, 1.0, 0.0, [None, None]), 
+    "gram   ": (1.0, 1.0, 0.0, [None, None]),       
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1412,19 +1449,20 @@ def get_loss_all(
         "args": args,
         "huber_c": huber_c
     }
-
+    """
     common_kwargs_focus = {
         "target": target_focus,
         "noise_pred": pred_focus,
         "args": args,
         "huber_c": huber_c
     } 
-
+    """
     
     # 各lossの算出=====================================
 
+
     # loss_outside = calc_loss_focus("outside", **common_kwargs_normal)
-    # loss_high_loss_area = calc_loss_focus("high_loss_area", **common_kwargs_normal)    
+    # loss_high_loss_area = calc_loss_focus("high_loss_area", **common_kwargs_normal)   
     
     pool_results = [
         calc_loss_pool(**common_kwargs_normal, is_above_limit = is_above_limit, scale_px=sp) 
@@ -1434,12 +1472,12 @@ def get_loss_all(
     loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
     
     loss_ch_vector = calc_loss_ch_vector(**common_kwargs_normal)  
-    
+    """
     if is_good_size:
         loss_ch_vector_focus = calc_loss_ch_vector(**common_kwargs_focus, loss_type = "huber") 
     else:
         loss_ch_vector_focus = torch.zeros(1, device=_device, dtype=_dtype)
-    
+    """
     loss_ch_flow = calc_loss_ch_flow(**common_kwargs_normal, is_above_limit=is_above_limit, searching_radius = [0.5, 4.0])
     loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
     """
@@ -1449,6 +1487,7 @@ def get_loss_all(
         loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
     """    
 
+    loss_gram = calc_loss_gram(**common_kwargs_normal)
     loss_batch_pool_64px = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=is_above_limit,  mode="pool", scale_px=64)
     loss_batch_pixel = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="pixel")    
     #loss_batch_ch_vector = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="ch_vector")
@@ -1465,10 +1504,11 @@ def get_loss_all(
         loss_pool_51px_var,        
         loss_pool_32px_var,        
         loss_ch_vector, 
-        loss_ch_vector_focus,
+        #loss_ch_vector_focus,
         loss_ch_flow,     
         loss_sparsity,
-        # loss_sparsity_focus,        
+        # loss_sparsity_focus,
+        loss_gram,        
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
