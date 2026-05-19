@@ -89,8 +89,8 @@ def latents_focus(target, noise_pred, cropped_size=128):
         ]
     ]
     
-    # 最終的なターゲットサイズが確保できない場合はスキップ
-    is_good_size = (H >= detect_sizes[-1]) and (W >= detect_sizes[-1])
+    # ターゲットサイズが確保できない場合はスキップ
+    is_good_size = (H >= detect_sizes[-2]) and (W >= detect_sizes[-2])
     if not is_good_size:
         return target, noise_pred, is_good_size
         
@@ -99,6 +99,13 @@ def latents_focus(target, noise_pred, cropped_size=128):
     top_left_y = torch.zeros(B, dtype=torch.long, device=_device)
     top_left_x = torch.zeros(B, dtype=torch.long, device=_device)
     window_h, window_w = H, W
+    
+    # detect_sizesの重複を除去 (e.g. detect_sizes = [512, 512, 256] → [512, 256])
+    tmp_sizes = []
+    for s in detect_sizes:
+        if s not in tmp_sizes:
+            tmp_sizes.append(s)
+    detect_sizes = tmp_sizes
     
     for detect_size in detect_sizes:
         for i in range(B):
@@ -393,7 +400,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     
     return loss_real, loss_imag
     
-def calc_loss_ch_vector(target, noise_pred, args, huber_c):
+def calc_loss_ch_vector(target, noise_pred, args, huber_c, loss_type = None):
     """
     ピクセル単位のチャネル間ベクトルの一致度を算出。
     色相や概念の向きを評価
@@ -417,7 +424,7 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c):
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        loss_type=args.loss_type,
+        loss_type=args.loss_type if loss_type is None else loss_type,
         huber_c=huber_c
     )
             
@@ -591,15 +598,12 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c, loss_type = None):
     scales = 1.0
     if scales != 1.0:
         feat_pred = feat_pred * scales
-        feat_target = feat_target * scales
-        
-    if loss_type is None:
-        loss_type = args.loss_type        
+        feat_target = feat_target * scales   
 
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        loss_type=loss_type,
+        loss_type=args.loss_type if loss_type is None else loss_type,
         huber_c=huber_c
     )
 
@@ -657,7 +661,7 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
                 cropped_size
             ]
         ]
-        if H < detect_sizes[-1] or W < detect_sizes[-1]:
+        if H < detect_sizes[-2] or W < detect_sizes[-2]:
             return None
         
         # Initialize
@@ -665,6 +669,13 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
         top_left_y = torch.zeros(B, dtype=torch.long, device=_device)
         top_left_x = torch.zeros(B, dtype=torch.long, device=_device)
         window_h, window_w = H, W
+
+        # detect_sizesの重複を除去 (e.g. detect_sizes = [512, 512, 256] → [512, 256])
+        tmp_sizes = []
+        for s in detect_sizes:
+            if s not in tmp_sizes:
+                tmp_sizes.append(s)
+        detect_sizes = tmp_sizes
 
         for detect_size in detect_sizes:
             for i in range(B):
@@ -909,9 +920,10 @@ _LOSS_CONFIG = {
     "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
     "ch_vector": (1.0, 1.0, 0.0, [None, None]),
+    "ch_vec.focus": (0.5, 1.0, 0.0, [None, None]),    
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]), 
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
-    "spars.focus":  (0.5, 1.0, 0.0, [None, None]),  # sparsity通常版と比べて小さく設定       
+    #"spars.focus":  (0.5, 1.0, 0.0, [None, None]),     
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1392,7 +1404,7 @@ def get_loss_all(
     target_mod = target if is_batched else target.unsqueeze(0)
     pred_mod = noise_pred if is_batched else noise_pred.unsqueeze(0)
     
-    target_focus_128px, pred_focus_128px, is_good_size = latents_focus(target_mod, pred_mod, cropped_size=128) 
+    target_focus, pred_focus, is_good_size = latents_focus(target_mod, pred_mod, cropped_size=256) 
     
     common_kwargs_normal = {
         "target": target_mod,
@@ -1400,10 +1412,10 @@ def get_loss_all(
         "args": args,
         "huber_c": huber_c
     }
-    
+
     common_kwargs_focus = {
-        "target": target_focus_128px,
-        "noise_pred": pred_focus_128px,
+        "target": target_focus,
+        "noise_pred": pred_focus,
         "args": args,
         "huber_c": huber_c
     } 
@@ -1421,16 +1433,22 @@ def get_loss_all(
     loss_pool_51px_mean, loss_pool_51px_var = pool_results[0]
     loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
     
-    loss_ch_vector = calc_loss_ch_vector(**common_kwargs_normal)    
-    loss_ch_flow = calc_loss_ch_flow(**common_kwargs_normal, is_above_limit=is_above_limit, searching_radius = [0.5, 4.0])
-    loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
+    loss_ch_vector = calc_loss_ch_vector(**common_kwargs_normal)  
     
     if is_good_size:
+        loss_ch_vector_focus = calc_loss_ch_vector(**common_kwargs_focus, loss_type = "huber") 
+    else:
+        loss_ch_vector_focus = torch.zeros(1, device=_device, dtype=_dtype)
+    
+    loss_ch_flow = calc_loss_ch_flow(**common_kwargs_normal, is_above_limit=is_above_limit, searching_radius = [0.5, 4.0])
+    loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
+    """
+    if is_good_size:
         loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "huber") 
-        # L1の理由は、もともとlossが大きいところの領域なので、L1にしても、gradのゼロクロスは発生しにくく、オーバーシュートにはなりにくいと判断。あと綺麗さ確保のため
     else:
         loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
-    
+    """    
+
     loss_batch_pool_64px = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=is_above_limit,  mode="pool", scale_px=64)
     loss_batch_pixel = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="pixel")    
     #loss_batch_ch_vector = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="ch_vector")
@@ -1440,20 +1458,21 @@ def get_loss_all(
     # リストの位置が重要なので、必ず何かを代入すること。統合をスキップしたい場合はNoneを代入する。
     all_computed_losses = [
         loss_base,
-        #loss_outside,
-        #loss_high_loss_area, # 開発中
+        # loss_outside,
+        # loss_high_loss_area, # 開発中
         loss_pool_51px_mean,
         loss_pool_32px_mean,
         loss_pool_51px_var,        
         loss_pool_32px_var,        
         loss_ch_vector, 
+        loss_ch_vector_focus,
         loss_ch_flow,     
         loss_sparsity,
-        loss_sparsity_focus,        
+        # loss_sparsity_focus,        
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
-        #loss_batch_ch_vector,
+        # loss_batch_ch_vector,
         loss_batch_sparsity,
     ]
     
