@@ -1539,12 +1539,12 @@ def calc_extra_losses(
 ):
     global _current_snr_weight_inv, _current_mask,  _dtype, _device, _random_seed_1
     
-    
     _current_mask = current_mask
     _dtype = target.dtype
     _device = target.device
     _random_seed_1 = random.randint(0, 2**32 - 1)
     
+    #print(f"snr_weight:{snr_weight}")
     snr_weight_inv = 1.0 - snr_weight # 反転処理とdtype変換
 
     # loss.dim() が 4 なら [B, 1, 1, 1]、3 なら [B, 1, 1]
