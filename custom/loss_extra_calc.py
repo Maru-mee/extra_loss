@@ -1073,6 +1073,7 @@ def combine_losses_dynamically(
             # EMA（指数移動平均）の更新
 
             current_loss_instance_mean = loss_instance.mean().item()
+            """
             if current_loss_instance_mean > 0.0: #主にloss計算がスキップされたケースではEMA計算してはいけないためスキップ
                 if loss_name not in _loss_EMA_dict:
                     _loss_EMA_dict[loss_name] = current_loss_instance_mean
@@ -1081,7 +1082,7 @@ def combine_losses_dynamically(
                     _loss_EMA_dict[loss_name] = (beta * _loss_EMA_dict[loss_name]) + ((1.0 - beta) * current_loss_instance_mean)
                 
                 loss_instance = reduce_micro_loss_on_lowres(loss_instance, area_img, _loss_EMA_dict[loss_name])
-            
+            """
             if global_step % print_interval_step == 0 or is_debug_mode:
                 def loss_bar(loss):
                     max_bar = 10  # 0.05刻みで最大0.5 → 10段階
