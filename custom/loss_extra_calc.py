@@ -36,7 +36,7 @@ if is_logging_grad:
         except ImportError:
             print("warning: grad_logger not found in debug folder")        
 
-_current_snr_weight = None
+_current_snr_weight_inv = None
 _current_mask = None
 _random_seed_1 = 0
 _dtype = None
@@ -324,13 +324,13 @@ def apply_snr_weight_cutoff(loss, max_snr_weight):
     
     max_snr_weight : snr_weightのうち、どのくらいの値以下を学習対象とするか。
     """
-    snr_weight_map = _current_snr_weight.view(-1, 1)
-    snr_weight_map = torch.where(
-        snr_weight_map < max_snr_weight, 
-        snr_weight_map, 
-        torch.zeros_like(snr_weight_map)
+    snr_weight_inv = _current_snr_weight_inv.view(-1, 1)
+    snr_weight_inv = torch.where(
+        snr_weight_inv < max_snr_weight, 
+        torch.zeros_like(snr_weight_inv),
+        snr_weight_inv
     )
-    loss = loss * snr_weight_map
+    loss = loss * snr_weight_inv
     
     return loss
     
@@ -396,8 +396,8 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     )
     
     # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない    
-    loss_real = apply_snr_weight_cutoff(loss_real, max_snr_weight = 0.8)
-    loss_imag = apply_snr_weight_cutoff(loss_imag, max_snr_weight = 0.8)
+    loss_real = apply_snr_weight_cutoff(loss_real, max_snr_weight = 0.2)
+    loss_imag = apply_snr_weight_cutoff(loss_imag, max_snr_weight = 0.2)
     
     return loss_real, loss_imag
     
@@ -895,7 +895,7 @@ def calc_loss_batch_relation(
     for i in range(batch_size):
         for j in range(i + 1, batch_size):
             # SNRの差が0.1未満か判定
-            snr_diff = torch.abs(_current_snr_weight[i] - _current_snr_weight[j])
+            snr_diff = torch.abs(_current_snr_weight_inv[i] - _current_snr_weight_inv[j])
             
             if snr_diff < 0.1:
                 indices = [i, j]
@@ -1534,16 +1534,24 @@ def calc_extra_losses(
     huber_c, 
     global_step, 
     accelerator, 
-    snr_weight_view, # 高ノイズ領域のときほど値が大きくなる係数（0～1.0）
+    snr_weight,
     current_mask=None,
 ):
-    global _current_snr_weight, _current_mask,  _dtype, _device, _random_seed_1
+    global _current_snr_weight_inv, _current_mask,  _dtype, _device, _random_seed_1
     
-    _current_snr_weight = snr_weight_view
+    
     _current_mask = current_mask
     _dtype = target.dtype
     _device = target.device
     _random_seed_1 = random.randint(0, 2**32 - 1)
+    
+    snr_weight_inv = 1.0 - snr_weight # 反転処理とdtype変換
+
+    # loss.dim() が 4 なら [B, 1, 1, 1]、3 なら [B, 1, 1]
+    snr_weight_inv_view = snr_weight_inv.view(snr_weight_inv.shape[0], *([1] * (target.dim() - 1)))
+    print(f"snr_weight_inv_view:{snr_weight_inv_view}")
+    #print(f"DEBUG: snr_weight_view.dtype={snr_weight_view.dtype}")
+    _current_snr_weight_inv = snr_weight_inv_view
     
     if is_debug_time:
         start_time = time.time()
