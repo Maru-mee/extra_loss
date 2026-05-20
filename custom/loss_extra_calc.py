@@ -71,6 +71,64 @@ def get_image_hw(image_tensor):
     area_img = area_latents * 64
     return H, W, area_latents, area_img
 
+# キャッシュを格納する辞書
+_gauss_ker_cache = collections.defaultdict(dict)
+def filtering_gaussian(x, ksize = 3):
+    """
+    入力テンソルxにガウシアンフィルタを適用した結果を返します。
+    （元の get_gaussian_kernel 関数の機能を変更）
+
+    Args:
+        x (torch.Tensor): 入力テンソル（noise_predまたはtarget）。(B, C, H, W)
+        dtype (torch.dtype): テンソルのデータ型。
+        device (torch.device): テンソルのデバイス。
+
+    Returns:
+        torch.Tensor: ガウシアンフィルタを適用した結果。
+    """
+
+    # フィルタのパラメータ設定 (元の関数から流用)
+    sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
+    channels = x.shape[1]
+    
+    # カーネルのキャッシュキーを生成
+    ksize_tuple = (ksize, ksize)
+    dtype_str = str(_dtype)
+
+    # キャッシュをチェック
+    if ksize_tuple in _gauss_ker_cache[sigma] and dtype_str in _gauss_ker_cache[sigma][ksize_tuple]:
+        kernel_2d = _gauss_ker_cache[sigma][ksize_tuple][dtype_str].to(_device, dtype=_dtype)
+    else:
+        # カーネルの生成（1D）
+        kernel_1d = cv2.getGaussianKernel(ksize, sigma)
+        kernel_1d = torch.from_numpy(kernel_1d).to(_dtype).to(_device)
+        
+        # 2Dカーネルに変換 (1, 1, H, W)
+        kernel_2d = torch.matmul(kernel_1d, kernel_1d.T).unsqueeze(0).unsqueeze(0)
+
+        # キャッシュに格納 (チャネル軸を持つ前の 2D カーネルを CPU に格納)
+        if ksize_tuple not in _gauss_ker_cache[sigma]:
+            _gauss_ker_cache[sigma][ksize_tuple] = {}
+            
+        _gauss_ker_cache[sigma][ksize_tuple][dtype_str] = kernel_2d.detach().clone().cpu()
+
+    # チャネル数に対応させる (C, 1, H, W)
+    kernel = kernel_2d.repeat(channels, 1, 1, 1)
+    
+    # ガウシアンフィルタを適用
+    # `groups=channels`でチャネルごとの畳み込み、`padding`は ksize から自動計算
+    padding = ksize // 2 
+    
+    filtered_x = torch.nn.functional.conv2d(
+        input=x.float(),
+        weight=kernel.float(),
+        padding=padding, 
+        groups=channels
+    )
+    filtered_x = filtered_x.to(_dtype)
+    
+    return filtered_x
+
 def latents_focus(target, noise_pred, cropped_size=128):
     """
     target, noise_predに対して、
@@ -259,31 +317,31 @@ def compare_vector(mode, x):
 def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
     # 基本的には、sd-scripts/train_utilからの参照
     
-    if loss_type == "huber":
+    if loss_type == "smooth_l1_nn_function":
         # sd-scriptsよりも、c値を高く取りたい場合のモード。
         # L2を使用したいが、外れ値をL1にしたい場合に使う
         
         if torch.is_complex(feat_pred):
-            loss_real = torch.nn.functional.huber_loss(
+            loss_real = torch.nn.functional.smooth_l1_loss(
                 feat_pred.real.float(), 
                 feat_target.real.float(),
                 reduction="none", 
-                delta=1.0
+                beta=1.0
             )
-            loss_imag = torch.nn.functional.huber_loss(
+            loss_imag = torch.nn.functional.smooth_l1_loss(
                 feat_pred.imag.float(), 
                 feat_target.imag.float(),
                 reduction="none", 
-                delta=1.0
+                beta=1.0
             )
             loss = loss_real + loss_imag
         
         else:
-            loss = torch.nn.functional.huber_loss(
+            loss = torch.nn.functional.smooth_l1_loss(
                 feat_pred.float(), 
                 feat_target.float(),
                 reduction="none", 
-                delta=1.0
+                beta=1.0
             )
         return loss * 2.0 # 数式上、L2よりも半減するので、２倍にしてカバー            
         
@@ -316,21 +374,30 @@ def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
         
         return loss
 
-def apply_snr_weight_cutoff(loss, max_snr_weight):
+def apply_snr_weight_cutoff(loss, cutoff_during_initial = 0, cutoff_during_end = 9999.0):
     """
-    グローバル変数のcurrent_snr_weight（batch別の0-1の範囲）に対して、
-    snr_weightが高すぎる領域において影響度を下げるweightを作成して、
-    lossへ適用
+    SNRによっては役に立たないlossをカットオフする関数
     
-    max_snr_weight : snr_weightのうち、どのくらいの値以下を学習対象とするか。
+    _current_snr_weight（batch毎に設定された0-1の範囲）に対して、
+    0 - cutoff_during_initial(生成初期のノイズだらけの状態を0とする。
+    SNRのinvの値に応じた値)において、lossをカットオフする
+    
+    cutoff_during_initial : この値を下回るときcut off 
+    cutoff_during_end     : この値を超えるときcut off
+    
+    なお、"initial", "end"という添え字がついているが、生成時のどこに対応しているかをわかるように示しているだけで、学習時の初期・終了とは一切関係なし
     """
-    snr_weight_inv = _current_snr_weight_inv.view(-1, 1)
-    snr_weight_inv = torch.where(
-        snr_weight_inv < max_snr_weight, 
+
+    # lossの次元数に合わせてサイズ調整
+    snr_weight_inv = _current_snr_weight_inv.view(-1, *([1] * (loss.ndim - 1)))
+    
+    # 指定条件に合わせて、マップ上書き
+    loss_weight = torch.where(
+        (snr_weight_inv < cutoff_during_initial) | (snr_weight_inv > cutoff_during_end) ,
         torch.zeros_like(snr_weight_inv),
-        snr_weight_inv
+        torch.ones_like(snr_weight_inv)
     )
-    loss = loss * snr_weight_inv
+    loss = loss * loss_weight
     
     return loss
     
@@ -362,6 +429,10 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
 
     def extract_features(x, num_grid_h, num_grid_w):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
+        
+        # 低周波成分を学習してしまうことで発生する、画面全体の大きなオーバーシュートをなくすため、
+        # 元の信号から低周波成分を差し引く。それによって、高周波（小物や構造）のみを抽出できる
+        x = x - filtering_gaussian(x, ksize = 7)
                     
         pool_x  = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                              
@@ -385,19 +456,19 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
     loss_real = apply_conditional_loss(
         feat_pred.real.float(), 
         feat_target.real.float(),
-        loss_type="huber",
+        loss_type="smooth_l1_nn_function",
         huber_c=huber_c
     )
     loss_imag = apply_conditional_loss(
         feat_pred.imag.float(), 
         feat_target.imag.float(),
-        loss_type="huber",
+        loss_type="smooth_l1_nn_function",
         huber_c=huber_c
     )
     
-    # timestep=1000付近では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない    
-    loss_real = apply_snr_weight_cutoff(loss_real, max_snr_weight = 0.2)
-    loss_imag = apply_snr_weight_cutoff(loss_imag, max_snr_weight = 0.2)
+    # timestep=1000（initial）及び終了側では、poolは粗すぎてアーティファクト発生の原因になるため、学習させたくない    
+    loss_real = apply_snr_weight_cutoff(loss_real, cutoff_during_initial = 0.1, cutoff_during_end = 0.8)
+    loss_imag = apply_snr_weight_cutoff(loss_imag, cutoff_during_initial = 0.1, cutoff_during_end = 0.8)
     
     return loss_real, loss_imag
     
@@ -428,6 +499,8 @@ def calc_loss_ch_vector(target, noise_pred, args, huber_c, loss_type = None):
         loss_type=args.loss_type if loss_type is None else loss_type,
         huber_c=huber_c
     )
+    
+    loss = apply_snr_weight_cutoff(loss, cutoff_during_initial = 0.1)
             
     return loss
 
@@ -536,9 +609,11 @@ def calc_loss_ch_flow(target, noise_pred, args, huber_c, is_above_limit, searchi
     loss = apply_conditional_loss(
         feat_pred,
         feat_target,
-        loss_type="huber", # デフォルトはL2ライク系。ピクセル間の相対評価でしかなく、周囲のクロップやボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
+        loss_type="smooth_l1_nn_function", # デフォルトはL2ライク系。ピクセル間の相対評価でしかなく、周囲のクロップやボーダー問題など諸問題発生の原因になるため、L1はちょっと良くない
         huber_c=huber_c
     )
+    
+    # loss = apply_snr_weight_cutoff(loss, cutoff_during_initial = 0.1) # 導入したいけど、テンソル形状合わせが未完了
     
     return loss
 
@@ -607,6 +682,8 @@ def calc_loss_sparsity(target, noise_pred, args, huber_c, loss_type = None):
         loss_type=args.loss_type if loss_type is None else loss_type,
         huber_c=huber_c
     )
+    
+    loss = apply_snr_weight_cutoff(loss, cutoff_during_initial = 0.1)
 
     return loss
 
@@ -738,8 +815,10 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
         loss_type=args.loss_type,
         huber_c=huber_c
     )
+    
+    loss = apply_snr_weight_cutoff(loss, cutoff_during_initial = 0.1)
 
-    return loss    
+    return loss
 
 def calc_loss_gram(target, noise_pred, args, huber_c):
     """
@@ -772,6 +851,8 @@ def calc_loss_gram(target, noise_pred, args, huber_c):
         loss_type=args.loss_type,
         huber_c=huber_c
     )
+    
+    loss = apply_snr_weight_cutoff(loss, cutoff_during_initial = 0.1)
 
     return loss   
 
@@ -897,7 +978,7 @@ def calc_loss_batch_relation(
             # SNRの差が0.1未満か判定
             snr_diff = torch.abs(_current_snr_weight_inv[i] - _current_snr_weight_inv[j])
             
-            if snr_diff < 0.1:
+            if snr_diff < 0.1 and _current_snr_weight_inv[i] > 0.1 and _current_snr_weight_inv[i] < 0.9:
                 indices = [i, j]
                 #print_storage("keep", f"calc loss_batch_relation\tbatch{i} vs batch{j}")
                 
@@ -920,9 +1001,9 @@ def calc_loss_batch_relation(
                     feat_target = feat_target * scales
                 
                 if mode=="pool":                
-                    loss_type = "huber" # 収束時の精度が低く,grad_maxが高いため、非収束時向けのためL2を使う
+                    loss_type = "smooth_l1_nn_function" # 収束時の精度が低く,grad_maxが高いため、非収束時向けのためL2を使う
                 elif mode=="pixel" or mode=="ch_vector" or mode=="ch_sparsity": 
-                    loss_type = "huber" # L1かL2か悩ましい。loss_extraのコンセプトを強調しつつトークン意味固着予防するという点では、L1でも良い気もするがデバッグではやや不安定
+                    loss_type = "smooth_l1_nn_function" # L1かL2か悩ましい。loss_extraのコンセプトを強調しつつトークン意味固着予防するという点では、L1でも良い気もするがデバッグではやや不安定
                 elif mode=="others":    
                     loss_type=args.loss_type
                     
@@ -951,9 +1032,9 @@ _LOSS_CONFIG = {
     "base   ":  (1.0, 1.0, 0.0, [None, None]),    # 最も大切なlossではあるが、grad/loss効率が低いので、強調したいところ
     # "outside": (1.0, 1.0, 0.0, [None, None]),
     # "hi-loss_area": (1.0, 1.0, 0.0, [None, None]),   
-    "pool_51px_me": (1.0, 1.0, 0.0, [None, None]),
+    #"pool_51px_me": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_me": (1.0, 1.0, 0.0, [None, None]),
-    "pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
+    #"pool_51px_va": (1.0, 1.0, 0.0, [None, None]),
     "pool_32px_va": (1.0, 1.0, 0.0, [None, None]),    
     "ch_vector": (1.0, 1.0, 0.0, [None, None]),
     #"ch_vec.focus": (0.5, 1.0, 0.0, [None, None]),    
@@ -1465,25 +1546,21 @@ def get_loss_all(
     # loss_outside = calc_loss_focus("outside", **common_kwargs_normal)
     # loss_high_loss_area = calc_loss_focus("high_loss_area", **common_kwargs_normal)   
     
-    pool_results = [
-        calc_loss_pool(**common_kwargs_normal, is_above_limit = is_above_limit, scale_px=sp) 
-        for sp in [51, 32]  # 32pxと独立性が強く、計算コストの比較的低い値=51px
-    ]
-    loss_pool_51px_mean, loss_pool_51px_var = pool_results[0]
-    loss_pool_32px_mean, loss_pool_32px_var = pool_results[1]
+    loss_pool_32px_mean, loss_pool_32px_var = calc_loss_pool(**common_kwargs_normal, is_above_limit = is_above_limit, scale_px=32)
     
     loss_ch_vector = calc_loss_ch_vector(**common_kwargs_normal)  
     """
     if is_good_size:
-        loss_ch_vector_focus = calc_loss_ch_vector(**common_kwargs_focus, loss_type = "huber") 
+        loss_ch_vector_focus = calc_loss_ch_vector(**common_kwargs_focus, loss_type = "smooth_l1_nn_function") 
     else:
         loss_ch_vector_focus = torch.zeros(1, device=_device, dtype=_dtype)
     """
     loss_ch_flow = calc_loss_ch_flow(**common_kwargs_normal, is_above_limit=is_above_limit, searching_radius = [0.5, 4.0])
     loss_sparsity = calc_loss_sparsity(**common_kwargs_normal)
+
     """
     if is_good_size:
-        loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "huber") 
+        loss_sparsity_focus = calc_loss_sparsity(**common_kwargs_focus, loss_type = "smooth_l1_nn_function") 
     else:
         loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
     """    
@@ -1500,9 +1577,9 @@ def get_loss_all(
         loss_base,
         # loss_outside,
         # loss_high_loss_area, # 開発中
-        loss_pool_51px_mean,
+        #loss_pool_51px_mean,
         loss_pool_32px_mean,
-        loss_pool_51px_var,        
+        #loss_pool_51px_var,        
         loss_pool_32px_var,        
         loss_ch_vector, 
         #loss_ch_vector_focus,
