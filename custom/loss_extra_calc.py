@@ -915,6 +915,7 @@ def calc_loss_batch_relation(
             num_grid_h = int(max(1, H // scale_latents))
             num_grid_w = int(max(1, W // scale_latents))            
                         
+            x = x - filtering_gaussian(x, ksize = 7)
             pool_x = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                                  
             features = [
