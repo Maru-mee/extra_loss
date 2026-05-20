@@ -32,10 +32,10 @@ sd-scriptsの非公式MOD(非公認MOD)のような位置づけです。<br>
 * ベースモデルからの大規模学習における、素早い学習をアシストする
 
 * 使用例：<br>
-<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/434c4e95-c2ab-4a64-951e-195a1b04dd4d" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
+<img alt="ON_OFF比較" src="https://github.com/user-attachments/assets/99b6b229-b701-432a-b2a2-2e95bc83f6fd" /><img alt="zko (7)_Target" src="https://github.com/user-attachments/assets/18da6f3e-c8b8-4f0b-ba45-9ce687023631" width="125">
 
   ポイント：
-  * full_body, standing_on_one_leg, 画風が、早期に再現及び維持できています。
+  * full_body, standing_on_one_leg, ヘアバンド等の小物が、早期に再現及び維持できています。
   * 構造と無関係なノイズ感が低下します。
   * 正則化画像なしにも関わらず、初期の構造破損は最小限に留まり、一貫性のある変化をしています
   * 発色がより鮮やかになります。
