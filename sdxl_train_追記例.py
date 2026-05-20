@@ -40,14 +40,9 @@ from custom.loss_extra_calc import calc_extra_losses
                             snr = noise_scheduler.all_snr[timesteps]
                             if args.v_parameterization:
                                 snr_weight = 1.0 / (snr + 1.0)
-                            else:
+                            else:                                
                                 snr_weight = snr / (snr + 1.0)
-                                
-                            snr_weight = 1.0 - snr_weight # 反転処理とdtype変換
-                                
-                            # loss.dim() が 4 なら [B, 1, 1, 1]、3 なら [B, 1, 1]
-                            snr_weight_view = snr_weight.view(snr_weight.shape[0], *([1] * (target.dim() - 1)))
-                            
+                                                        
                             current_mask = batch["alpha_masks"] if (args.masked_loss and "alpha_masks" in batch) else None
                             
                             loss = calc_extra_losses(
@@ -58,7 +53,7 @@ from custom.loss_extra_calc import calc_extra_losses
                                 huber_c, 
                                 global_step, 
                                 accelerator,
-                                snr_weight_view,
+                                snr_weight,
                                 current_mask,
                             )
                         
