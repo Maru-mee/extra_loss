@@ -1549,7 +1549,7 @@ def calc_extra_losses(
 
     # loss.dim() が 4 なら [B, 1, 1, 1]、3 なら [B, 1, 1]
     snr_weight_inv_view = snr_weight_inv.view(snr_weight_inv.shape[0], *([1] * (target.dim() - 1)))
-    print(f"snr_weight_inv_view:{snr_weight_inv_view}")
+    #print(f"snr_weight_inv_view:{snr_weight_inv_view}")
     #print(f"DEBUG: snr_weight_view.dtype={snr_weight_view.dtype}")
     _current_snr_weight_inv = snr_weight_inv_view
     
