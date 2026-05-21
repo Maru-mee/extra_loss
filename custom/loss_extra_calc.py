@@ -816,13 +816,10 @@ def calc_loss_focus(mode, target, noise_pred, args, huber_c):
 
     return loss
 
-def calc_loss_gram(target, noise_pred, args, huber_c):
+def calc_loss_bmm_ch(target, noise_pred, args, huber_c):
     """
-    ピクセル間の相対差を評価するloss.
-    相対情報に特化しており、トークン学習に効果があると思われる。
-    パーツ間の自然なつながりを要求する
-    
-    絶対値についてはこだわらない。
+    チャンネル間の相関（色の組み合わせや特徴の共起性）を評価する
+    相対情報に特化しており、絶対値についてはこだわらない。
     """
     
     H, W, area_latents, _ = get_image_hw(target)
@@ -1036,7 +1033,7 @@ _LOSS_CONFIG = {
     "ch_flow":  (1.0, 1.0, 0.0, [None, None]), 
     "sparsity":  (1.0, 1.0, 0.0, [None, None]),
     #"spars.focus":  (0.5, 1.0, 0.0, [None, None]), 
-    "gram   ": (1.0, 1.0, 0.0, [None, None]),       
+    "bmm_ch ": (1.0, 1.0, 0.0, [None, None]),       
     "batch_p_64px": (1.0, 1.0, 0.0, [None, None]),
     "batch_px": (1.0, 1.0, 0.0, [None, None]),
     #"batch_ch_vec": (1.0, 1.0, 0.0, [None, None]),
@@ -1560,7 +1557,7 @@ def get_loss_all(
         loss_sparsity_focus = torch.zeros(1, device=_device, dtype=_dtype)
     """    
 
-    loss_gram = calc_loss_gram(**common_kwargs_normal)
+    loss_bmm_ch = calc_loss_bmm_ch(**common_kwargs_normal)
     loss_batch_pool_64px = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=is_above_limit,  mode="pool", scale_px=64)
     loss_batch_pixel = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="pixel")    
     #loss_batch_ch_vector = calc_loss_batch_relation(**common_kwargs_normal, is_above_limit=True, mode="ch_vector")
@@ -1581,7 +1578,7 @@ def get_loss_all(
         loss_ch_flow,     
         loss_sparsity,
         # loss_sparsity_focus,
-        loss_gram,        
+        loss_bmm_ch,        
         # loss_batch_pool_128px, # 廃止。gradのスケールが大きすぎる
         loss_batch_pool_64px,
         loss_batch_pixel,
