@@ -326,13 +326,13 @@ def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
                 feat_pred.real.float(), 
                 feat_target.real.float(),
                 reduction="none", 
-                beta=1.0
+                beta=3.0
             )
             loss_imag = torch.nn.functional.smooth_l1_loss(
                 feat_pred.imag.float(), 
                 feat_target.imag.float(),
                 reduction="none", 
-                beta=1.0
+                beta=3.0
             )
             loss = loss_real + loss_imag
         
@@ -341,7 +341,7 @@ def apply_conditional_loss(feat_pred, feat_target, loss_type, huber_c):
                 feat_pred.float(), 
                 feat_target.float(),
                 reduction="none", 
-                beta=1.0
+                beta=3.0
             )
         return loss * 2.0 # 数式上、L2よりも半減するので、２倍にしてカバー            
         
@@ -429,11 +429,7 @@ def calc_loss_pool(target, noise_pred, args, huber_c, is_above_limit, scale_px):
 
     def extract_features(x, num_grid_h, num_grid_w):
         # 空間情報の抽出：統計量を測定し、特徴を際立たせる
-        
-        # 低周波成分を学習してしまうことで発生する、画面全体の大きなオーバーシュートをなくすため、
-        # 元の信号から低周波成分を差し引く。それによって、高周波（小物や構造）のみを抽出できる
-        x = x - filtering_gaussian(x, ksize = 7)
-                    
+                            
         pool_x  = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                              
         features = [
@@ -915,7 +911,6 @@ def calc_loss_batch_relation(
             num_grid_h = int(max(1, H // scale_latents))
             num_grid_w = int(max(1, W // scale_latents))            
                         
-            x = x - filtering_gaussian(x, ksize = 7)
             pool_x = adaptive_avg_pool2d_for_latents(x.float(), (num_grid_h, num_grid_w))
                                  
             features = [
