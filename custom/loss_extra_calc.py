@@ -825,16 +825,15 @@ def calc_loss_gram(target, noise_pred, args, huber_c):
     絶対値についてはこだわらない。
     """
     
-    B, C, H, W = target.shape
-    HW = H * W
+    H, W, area_latents, _ = get_image_hw(target)
 
     # (B, C, H, W) -> (B, C, H*W)
     feat_pred   = noise_pred.flatten(start_dim=2)
     feat_target = target.flatten(start_dim=2)
 
     # (B, C, H*W) @ (B, H*W, C) -> (B, C, C), H*W面積で割って正規化
-    feat_pred   = torch.div(torch.bmm(feat_pred, feat_pred.transpose(1, 2)), H * W)
-    feat_target = torch.div(torch.bmm(feat_target, feat_target.transpose(1, 2)), H * W)
+    feat_pred   = torch.div(torch.bmm(feat_pred, feat_pred.transpose(1, 2)), area_latents)
+    feat_target = torch.div(torch.bmm(feat_target, feat_target.transpose(1, 2)), area_latents)
     
     scales = 1.0
     if scales != 1.0:
