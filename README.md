@@ -58,7 +58,7 @@ zunko, 1girl, solo, japanese clothes, muneate, tabi, hairband, kimono, smile, op
   * 効果の弱いlossをカットオフし、計算速度を向上
 
 ## 適用範囲
-* SDXLで検証済み。FLUX.1やAnimaといったモデルでも原理的には使用可能と考えています。
+* SDXLで検証済み。FLUX.1やAnimaといったモデルでも原理的には使用可能ですが、snr_weightを除去する改造は必要です
 * ε-pred, v-predに対応。
   * それ以外については、latentsに特化している都合により効果が得にくく、また、snr_weightによるノイズ状況による補正が働かないため、十分な効果は得にくくなります。
 * batch_size=2以上を推奨。
